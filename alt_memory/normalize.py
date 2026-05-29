@@ -30,7 +30,7 @@ _SLACK_PROVENANCE_FOOTER = (
 
 # ─── Noise stripping ─────────────────────────────────────────────────────
 # Claude Code and other tools inject system tags, hook output, and UI chrome
-# into transcripts. These waste drawer space and pollute search results.
+# into transcripts. These waste entity space and pollute search results.
 #
 # Verbatim is sacred — every pattern here is anchored to line boundaries and
 # refuses to cross blank lines, so a stray unclosed tag in one message can

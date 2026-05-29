@@ -143,7 +143,9 @@ def resolve_backend_for_dimension(
             return candidate
     _discover_entry_points()
     if dim_path:
-        for name, cls in _registry.items():
+        with _lock:
+            items = list(_registry.items())
+        for name, cls in items:
             try:
                 if cls.detect(dim_path):
                     return name
@@ -154,11 +156,20 @@ def resolve_backend_for_dimension(
 
 
 def _register_builtins() -> None:
-    """Register faiss as the in-tree default backend."""
-    from alt_memory.backends.faiss_backend import FaissBackend
+    """Register built-in backends (faiss, chroma)."""
+    try:
+        from alt_memory.backends.faiss_backend import FaissBackend
+        if "faiss" not in _registry:
+            _registry["faiss"] = FaissBackend
+    except ImportError:
+        logger.warning("faiss backend not available — skipping registration")
 
-    if "faiss" not in _registry:
-        _registry["faiss"] = FaissBackend
+    try:
+        from alt_memory.backends.chroma_backend import ChromaBackend
+        if "chroma" not in _registry:
+            _registry["chroma"] = ChromaBackend
+    except ImportError:
+        logger.warning("chroma backend not available — skipping registration")
 
 
 _register_builtins()

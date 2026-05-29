@@ -24,11 +24,11 @@ from pathlib import Path
 from typing import Optional
 
 from alt_memory.normalize import normalize
-from alt_memory.dimension import Dimension
+from alt_memory.dimension import Dimension, mine_lock
 
 logger = logging.getLogger("alt_memory")
 
-# Schema version for drawer normalization. Bump when the normalization
+# Schema version for entity normalization. Bump when the normalization
 # pipeline changes in a way that existing drawers should be rebuilt to pick up
 # (e.g., new noise-stripping rules). `file_already_mined` treats drawers with
 # a missing or stale `normalize_version` as "not mined", so the next mine pass
@@ -63,7 +63,7 @@ SKIP_DIRS = {
     "target",
 }
 
-# Cached hall keywords — avoids re-reading config per drawer
+# Cached hall keywords — avoids re-reading config per entity
 _HALL_KEYWORDS_CACHE = None
 
 
@@ -92,26 +92,26 @@ CONVO_EXTENSIONS = {
 }
 
 MIN_CHUNK_SIZE = 30
-CHUNK_SIZE = 800  # chars per drawer — align with miner.py
+CHUNK_SIZE = 800  # chars per entity — align with miner.py
 _LINE_GROUP_SIZE = 25  # lines per fallback group when no paragraph breaks
 _LINE_FALLBACK_MIN_NEWLINES = 20  # trigger line-group fallback above this newline count
-DRAWER_UPSERT_BATCH_SIZE = 1000
+ENTITY_UPSERT_BATCH_SIZE = 1000
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB — skip files larger than this.
 # Matches miner.py at 500 MB. Long Claude Code sessions, multi-year
 # ChatGPT exports, and lifetime Slack dumps routinely exceed 10 MB; the
-# cap at that level silently dropped them with `continue`. Per-drawer
+# cap at that level silently dropped them with `continue`. Per-entity
 # size is bounded by CHUNK_SIZE, but larger source files still produce
 # more drawers and therefore more embedding/storage work — and content
 # is normalized and loaded fully into memory before chunking, so memory
 # use also scales with source size.
 
 
-def _register_file(palace, source_file: str, realm: str, agent: str, extract_mode: str):
+def _register_file(dim, source_file: str, realm: str, agent: str, extract_mode: str):
     """Write a sentinel so file_already_mined() returns True for 0-chunk files.
 
     Without this, files that normalize to nothing or produce zero chunks are
     re-read and re-processed on every mine run because nothing was written to
-    the palace on the first pass.
+    the dimension on the first pass.
     """
     sentinel_key = f"{source_file}:{extract_mode}"
     sentinel_id = f"_reg_{hashlib.sha256(sentinel_key.encode()).hexdigest()[:24]}"
@@ -125,16 +125,16 @@ def _register_file(palace, source_file: str, realm: str, agent: str, extract_mod
         "extract_mode": extract_mode,
         "normalize_version": NORMALIZE_VERSION,
     }
-    palace._db.execute(
+    dim._db.execute(
         "INSERT OR REPLACE INTO entities (id, realm, domain, content, metadata, source_file) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (sentinel_id, realm, "_registry", f"[registry] {source_file}", json.dumps(meta), source_file),
     )
-    palace._db.execute(
+    dim._db.execute(
         "INSERT OR REPLACE INTO entities_fts (id, content) VALUES (?, ?)",
         (sentinel_id, f"[registry] {source_file}"),
     )
-    palace._db.commit()
+    dim._db.commit()
 
 
 def _metadata_matches_extract_mode(meta: dict, extract_mode: Optional[str]) -> bool:
@@ -144,8 +144,8 @@ def _metadata_matches_extract_mode(meta: dict, extract_mode: Optional[str]) -> b
     return stored_mode == extract_mode or (extract_mode == "exchange" and stored_mode is None)
 
 
-def _source_file_delete_ids(palace, source_file: str, extract_mode: str) -> list[str]:
-    """Collect drawer IDs for one source file and extraction mode.
+def _source_file_delete_ids(dim, source_file: str, extract_mode: str) -> list[str]:
+    """Collect entity IDs for one source file and extraction mode.
 
     Legacy conversation drawers did not carry extract_mode; treat those as
     exchange-mode rows so schema rebuilds can still clean them up without
@@ -153,7 +153,7 @@ def _source_file_delete_ids(palace, source_file: str, extract_mode: str) -> list
     """
     ids: list[str] = []
     try:
-        rows = palace._db.execute(
+        rows = dim._db.execute(
             "SELECT id, metadata FROM entities WHERE source_file = ?",
             (source_file,),
         ).fetchall()
@@ -167,12 +167,12 @@ def _source_file_delete_ids(palace, source_file: str, extract_mode: str) -> list
 
 
 def file_already_mined(
-    palace,
+    dim,
     source_file: str,
     check_mtime: bool = False,
     extract_mode: Optional[str] = None,
 ) -> bool:
-    """Check if a file has already been filed in the palace.
+    """Check if a file has already been filed in the dimension.
 
     Returns False (so the file gets re-mined) when:
       - no drawers exist for this source_file
@@ -190,7 +190,7 @@ def file_already_mined(
     treated as exchange-mode drawers.
     """
     try:
-        rows = palace._db.execute(
+        rows = dim._db.execute(
             "SELECT metadata FROM entities WHERE source_file = ?",
             (source_file,),
         ).fetchall()
@@ -423,46 +423,8 @@ def detect_convo_domain(content: str) -> str:
 
 
 # =============================================================================
-# PER-FILE AND PER-PALACE LOCKS
+# PER-DIMENSION LOCK
 # =============================================================================
-
-
-def mine_lock(source_file: str):
-    """Cross-platform file lock for mine operations.
-
-    Prevents multiple agents from mining the same file simultaneously,
-    which causes duplicate drawers when the delete+insert cycle interleaves.
-    """
-    lock_dir = os.path.join(os.path.expanduser("~"), ".alt-memory", "locks")
-    os.makedirs(lock_dir, exist_ok=True)
-    lock_path = os.path.join(
-        lock_dir, hashlib.sha256(source_file.encode()).hexdigest()[:16] + ".lock"
-    )
-
-    lf = open(lock_path, "w")
-    try:
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(lf, fcntl.LOCK_EX)
-        yield
-    finally:
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(lf, fcntl.LOCK_UN)
-        except Exception:
-            logger.debug("Mine-lock release failed", exc_info=True)
-        lf.close()
 
 
 class MineAlreadyRunning(RuntimeError):
@@ -676,7 +638,7 @@ def scan_convos(convo_dir: str) -> list:
 # =============================================================================
 
 
-def _file_chunks_locked(palace, source_file, chunks, realm, domain, agent, extract_mode):
+def _file_chunks_locked(dim, source_file, chunks, realm, domain, agent, extract_mode):
     """Lock the source file, purge stale drawers, and upsert fresh chunks.
 
     Combines the per-file serialization that prevents concurrent agents from
@@ -686,45 +648,45 @@ def _file_chunks_locked(palace, source_file, chunks, realm, domain, agent, extra
     Returns (drawers_added, domain_counts_delta, skipped).
     """
     domain_counts_delta: dict = defaultdict(int)
-    drawers_added = 0
+    entities_added = 0
     with mine_lock(source_file):
         # Re-check after lock — another agent may have just finished this file
         # at the current schema. A stale-version hit here returns False, so we
         # still fall through to the purge+rebuild path below.
-        if file_already_mined(palace, source_file, extract_mode=extract_mode):
+        if file_already_mined(dim, source_file, extract_mode=extract_mode):
             return 0, domain_counts_delta, True
 
         # Purge stale drawers first. When the normalize schema bumps,
         # file_already_mined() returned False for pre-v2 drawers — clean
         # them out so the source doesn't end up with mixed old/new drawers.
         try:
-            delete_ids = _source_file_delete_ids(palace, source_file, extract_mode)
+            delete_ids = _source_file_delete_ids(dim, source_file, extract_mode)
             if delete_ids:
                 for did in delete_ids:
-                    palace.delete_entity(did)
+                    dim.delete_entity(did)
         except Exception:
-            logger.debug("Stale-drawer purge failed for %s", source_file, exc_info=True)
+            logger.debug("Stale-entity purge failed for %s", source_file, exc_info=True)
 
         # Batch chunks into bounded upserts so large transcripts keep most of
         # the embedding speedup without one huge request. Keep
         # one filed_at per source file so all transcript drawers share an
         # ingest timestamp.
         filed_at = datetime.now().isoformat()
-        for batch_start in range(0, len(chunks), DRAWER_UPSERT_BATCH_SIZE):
+        for batch_start in range(0, len(chunks), ENTITY_UPSERT_BATCH_SIZE):
             batch_docs: list = []
             batch_ids: list = []
             batch_metas: list = []
-            for chunk in chunks[batch_start : batch_start + DRAWER_UPSERT_BATCH_SIZE]:
-                chunk_domain = chunk.get("memory_type", domain) if extract_mode == "general" else domain
+            for chunk in chunks[batch_start : batch_start + ENTITY_UPSERT_BATCH_SIZE]:
+                chunk_domain = chunk.get("memory_type", "general") if extract_mode == "general" else domain
                 if extract_mode == "general":
                     domain_counts_delta[chunk_domain] += 1
-                drawer_key = f"{source_file}:{extract_mode}:{chunk['chunk_index']}"
-                drawer_id = (
-                    f"drawer_{realm}_{chunk_domain}_"
-                    f"{hashlib.sha256(drawer_key.encode()).hexdigest()[:24]}"
+                entity_key = f"{source_file}:{extract_mode}:{chunk['chunk_index']}"
+                entity_id = (
+                    f"entity_{realm}_{chunk_domain}_"
+                    f"{hashlib.sha256(entity_key.encode()).hexdigest()[:24]}"
                 )
+                batch_ids.append(entity_id)
                 batch_docs.append(chunk["content"])
-                batch_ids.append(drawer_id)
                 batch_metas.append(
                     {
                         "realm": realm,
@@ -741,19 +703,19 @@ def _file_chunks_locked(palace, source_file, chunks, realm, domain, agent, extra
                 )
             try:
                 for doc_id, doc, meta in zip(batch_ids, batch_docs, batch_metas):
-                    palace.add_entity(
+                    dim.add_entity(
                         realm=meta["realm"],
                         domain=meta["domain"],
                         content=doc,
                         metadata=meta,
                         source_file=meta["source_file"],
-                        drawer_id=doc_id,
+                        entity_id=doc_id,
                     )
-                drawers_added += len(batch_docs)
+                entities_added += len(batch_docs)
             except Exception as e:
                 if "already exists" not in str(e).lower():
                     raise
-    return drawers_added, domain_counts_delta, False
+    return entities_added, domain_counts_delta, False
 
 
 def _is_ai_tool_path(path: Path) -> bool:
@@ -810,7 +772,7 @@ def _resolve_realm(convo_path: Path, realm: Optional[str]) -> str:
     return normalize_realm_name(convo_path.name)
 
 
-def prefetch_mined_set(palace, extract_mode: Optional[str] = None) -> set[str]:
+def prefetch_mined_set(dim, extract_mode: Optional[str] = None) -> set[str]:
     """Pre-fetch the set of source_files already mined at the current NORMALIZE_VERSION.
 
     Mirrors file_already_mined()'s version-gate semantics (check_mtime=False
@@ -822,13 +784,13 @@ def prefetch_mined_set(palace, extract_mode: Optional[str] = None) -> set[str]:
     so conversation mines skip per extraction mode rather than per source file.
 
     The convo miner walks thousands of transcript files; per-file
-    queries against SQLite cost ~2s on a 150k-drawer palace, making a
+    queries against SQLite cost ~2s on a 150k-entity dimension, making a
     2000-file sweep take >1h of pure skip-checking. This helper drops
     that to a single scan plus O(1) lookups.
     """
     mined: set[str] = set()
     try:
-        rows = palace._db.execute(
+        rows = dim._db.execute(
             "SELECT source_file, metadata FROM entities WHERE source_file != ''"
         ).fetchall()
         for src, meta_json in rows:
@@ -845,7 +807,7 @@ def prefetch_mined_set(palace, extract_mode: Optional[str] = None) -> set[str]:
 
 
 def _validate_dimension_fts5_after_mine(dim_path: str) -> None:
-    """Run PRAGMA quick_check on the palace SQLite DB after a mine."""
+    """Run PRAGMA quick_check on the dimension SQLite DB after a mine."""
     db_path = os.path.join(str(dim_path), "dimension.db")
     if os.path.isfile(db_path):
         try:
@@ -869,21 +831,21 @@ def mine_convos(
     dry_run: bool = False,
     extract_mode: str = "exchange",
 ):
-    """Mine a directory of conversation files into the palace.
+    """Mine a directory of conversation files into the dimension.
 
     extract_mode:
         "exchange" — default exchange-pair chunking (Q+A = one unit)
         "general"  — general extractor: decisions, preferences, milestones, problems, emotions
 
     The real work is in :func:`_mine_convos_impl`; this wrapper holds the
-    per-palace flock around it so two concurrent ``alt-memory mine --mode
-    convos`` invocations against the same palace can't pile up. This
+    per-dimension flock around it so two concurrent ``alt-memory mine --mode
+    convos`` invocations against the same dimension can't pile up. This
     mirrors the pattern in :func:`alt_memory.miner.mine`. The lock is
     non-blocking: ``MineAlreadyRunning`` propagates to the CLI (which
     renders a holder-aware message and exits non-zero) or to in-process
     callers that expect to coexist with another writer.
 
-    Dry-run skips the lock — it never writes to the palace and so cannot
+    Dry-run skips the lock — it never writes to the dimension and so cannot
     corrupt anything, and skipping the lock lets dry-run probes coexist
     with a live mine.
 
@@ -956,20 +918,20 @@ def _mine_convos_impl(
         print("  DRY RUN — nothing will be filed")
     print(f"{'-' * 55}\n")
 
-    palace = None if dry_run else Dimension(dim_path)
-    if palace:
-        palace.init()
+    dim = None if dry_run else Dimension(dim_path)
+    if dim:
+        dim.init()
 
     # Bulk pre-fetch already-mined set in one paginated pass instead of
-    # `len(files)` separate WHERE-source_file queries. On a 150k-drawer
-    # palace each per-file query costs ~2s, so a 2000-file sweep used to
+    # `len(files)` separate WHERE-source_file queries. On a 150k-entity
+    # each per-file query costs ~2s, so a 2000-file sweep used to
     # spend >1h just deciding to skip. prefetch_mined_set() does the same
     # decisions in a single scan; loop body becomes an O(1) set check.
     mined_set: set[str] = (
-        prefetch_mined_set(palace, extract_mode=extract_mode) if not dry_run else set()
+        prefetch_mined_set(dim, extract_mode=extract_mode) if not dry_run else set()
     )
 
-    total_drawers = 0
+    total_entities = 0
     files_skipped = 0
     domain_counts = defaultdict(int)
 
@@ -986,12 +948,12 @@ def _mine_convos_impl(
             content = normalize(str(filepath))
         except (OSError, ValueError):
             if not dry_run:
-                _register_file(palace, source_file, realm, agent, extract_mode)
+                _register_file(dim, source_file, realm, agent, extract_mode)
             continue
 
         if not content or len(content.strip()) < cfg_min_chunk_size:
             if not dry_run:
-                _register_file(palace, source_file, realm, agent, extract_mode)
+                _register_file(dim, source_file, realm, agent, extract_mode)
             continue
 
         # Chunk — either exchange pairs or general extraction
@@ -1009,7 +971,7 @@ def _mine_convos_impl(
 
         if not chunks:
             if not dry_run:
-                _register_file(palace, source_file, realm, agent, extract_mode)
+                _register_file(dim, source_file, realm, agent, extract_mode)
             continue
 
         # Detect domain from content (general mode uses memory_type instead)
@@ -1026,8 +988,8 @@ def _mine_convos_impl(
                 types_str = ", ".join(f"{t}:{n}" for t, n in type_counts.most_common())
                 print(f"    [DRY RUN] {filepath.name} \u2192 {len(chunks)} memories ({types_str})")
             else:
-                print(f"    [DRY RUN] {filepath.name} \u2192 domain:{domain} ({len(chunks)} drawers)")
-            total_drawers += len(chunks)
+                print(f"    [DRY RUN] {filepath.name} \u2192 domain:{domain} ({len(chunks)} entities)")
+            total_entities += len(chunks)
             # Track domain counts
             if extract_mode == "general":
                 for c in chunks:
@@ -1036,22 +998,22 @@ def _mine_convos_impl(
                 domain_counts[domain] += 1
             continue
 
-        if extract_mode != "general":
-            domain_counts[domain] += 1
-
         # Lock + purge stale + file fresh chunks. Lock serializes concurrent
         # agents; purge removes pre-v2 drawers so the schema bump applies.
-        drawers_added, domain_delta, skipped = _file_chunks_locked(
-            palace, source_file, chunks, realm, domain, agent, extract_mode
+        entities_added, domain_delta, skipped = _file_chunks_locked(
+            dim, source_file, chunks, realm, domain, agent, extract_mode
         )
         if skipped:
             files_skipped += 1
             continue
+
+        if extract_mode != "general":
+            domain_counts[domain] += 1
         for r, n in domain_delta.items():
             domain_counts[r] += n
 
-        total_drawers += drawers_added
-        print(f"  + [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers_added}")
+        total_entities += entities_added
+        print(f"  + [{i:4}/{len(files)}] {filepath.name[:50]:50} +{entities_added}")
 
     if not dry_run:
         _validate_dimension_fts5_after_mine(dim_path)
@@ -1060,11 +1022,12 @@ def _mine_convos_impl(
     print("  Done.")
     print(f"  Files processed: {len(files) - files_skipped}")
     print(f"  Files skipped (already filed): {files_skipped}")
-    print(f"  Drawers filed: {total_drawers}")
+    print(f"  Entities filed: {total_entities}")
     if domain_counts:
         print("\n  By domain:")
+        label = "entities" if extract_mode == "general" else "files"
         for d, count in sorted(domain_counts.items(), key=lambda x: x[1], reverse=True):
-            print(f"    {d:20} {count} files")
+            print(f"    {d:20} {count} {label}")
     print('\n  Next: alt-memory search "what you\'re looking for"')
     print(f"{'=' * 55}\n")
 

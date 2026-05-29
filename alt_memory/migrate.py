@@ -36,7 +36,7 @@ META_TABLE = "_meta"
 def _open_db(dim_path: str) -> sqlite3.Connection:
     base = Path(dim_path).expanduser().resolve()
     dim_db = base / "dimension.db"
-    legacy_db = base / "palace.db"
+    legacy_db = base / "palace.db"  # legacy filename from pre-rename era
     db_path = str(dim_db) if dim_db.exists() else str(legacy_db)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -166,11 +166,15 @@ def migrate_schema(dim_path: str, dry_run: bool = False) -> dict:
             logger.info("Applying migration %s", label)
             if not dry_run:
                 fn(dim_path, conn)
-                set_dimension_version(dim_path, target_version)
             report["migrations_applied"].append(label)
             report["version_after"] = target_version
 
         if not dry_run:
+            _ensure_meta_table(conn)
+            conn.execute(
+                f"INSERT OR REPLACE INTO {META_TABLE} (key, value) VALUES ('dimension_version', ?)",
+                (str(CURRENT_SCHEMA_VERSION),),
+            )
             conn.commit()
     finally:
         conn.close()
@@ -251,7 +255,7 @@ def status(dim_path: str) -> dict:
     """Detailed schema-version status of the dimension."""
     base = Path(dim_path).expanduser().resolve()
     dim_db = base / "dimension.db"
-    legacy_db = base / "palace.db"
+    legacy_db = base / "palace.db"  # legacy filename from pre-rename era
     dim_db_path = dim_db if dim_db.exists() else legacy_db
     data_dir = base / "data"
     index_file = data_dir / "index.faiss"

@@ -163,8 +163,12 @@ class BaseCollection(ABC):
         metadatas: Optional[list[dict]] = None,
         embeddings: Optional[list[list[float]]] = None,
     ) -> None:
-        if documents is None and metadatas is None and embeddings is None:
-            raise ValueError("update requires at least one of documents, metadatas, embeddings")
+        if embeddings is None:
+            raise ValueError(
+                "update requires embeddings (backends cannot re-embed internally)"
+            )
+        if documents is None and metadatas is None:
+            raise ValueError("update requires at least one of documents, metadatas")
         n = len(ids)
         for label, value in (
             ("documents", documents),

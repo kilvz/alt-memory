@@ -1,12 +1,18 @@
 """MCP (Model Context Protocol) server for Alt Memory.
-
+ 
 Exposes all Dimension operations as JSON-RPC tools over stdio or SSE transport.
 """
 
+from __future__ import annotations
+
 import json
 import logging
+import os
 import sys
+import threading
+import time
 import traceback
+from datetime import datetime
 from typing import Any, Optional
 
 try:
@@ -23,6 +29,7 @@ from alt_memory.entity_registry import EntityRegistry
 from alt_memory import dim_graph
 from alt_memory.sync import sync_dimension
 from alt_memory.config import AltMemoryConfig
+from alt_memory.dimension import Dimension
 
 try:
     from alt_memory.layers import MemoryStack
@@ -40,6 +47,89 @@ except ImportError:
 
 
 logger = logging.getLogger(__name__)
+
+# Write-Ahead Log (WAL)
+_WAL_DIR = os.path.join(os.path.expanduser("~"), ".alt-memory", "wal")
+os.makedirs(_WAL_DIR, exist_ok=True)
+_WAL_FILE = os.path.join(_WAL_DIR, "write_log.jsonl")
+_WAL_REDACT_KEYS = frozenset({"content", "entry", "query", "text", "metadata"})
+
+
+def _wal_log(dimension: str, method: str, params: dict, result: Any = None, error: str = "") -> None:
+    safe_params = {}
+    for k, v in params.items():
+        if any(rk in k for rk in _WAL_REDACT_KEYS):
+            safe_params[k] = f"[REDACTED {len(v)} chars]" if isinstance(v, str) else "[REDACTED]"
+        else:
+            safe_params[k] = v
+    entry = {
+        "timestamp": datetime.now().isoformat(),
+        "dimension": dimension,
+        "method": method,
+        "params": safe_params,
+        "result_status": "ok" if not error else "error",
+        "error": error,
+    }
+    try:
+        with open(_WAL_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+    except Exception as e:
+        logger.error("WAL write failed: %s", e)
+
+
+# Idle watchdog -- stale MCP server auto-exit
+_MCP_IDLE_HOURS_ENV = "ALT_MEMORY_MCP_IDLE_HOURS"
+_MCP_IDLE_HOURS_DEFAULT = 8.0
+_last_request_time: float = time.monotonic()
+
+
+def _mcp_idle_timeout_secs() -> float:
+    raw = os.environ.get(_MCP_IDLE_HOURS_ENV, "")
+    if raw:
+        try:
+            hours = float(raw)
+            return max(0.0, hours) * 3600
+        except ValueError:
+            return 0.0
+    return _MCP_IDLE_HOURS_DEFAULT * 3600
+
+
+def _start_idle_exit_watchdog() -> None:
+    timeout = _mcp_idle_timeout_secs()
+    if timeout <= 0:
+        return
+    check_interval = min(60.0, timeout / 4)
+
+    def _watchdog() -> None:
+        while True:
+            time.sleep(check_interval)
+            idle = time.monotonic() - _last_request_time
+            if idle >= timeout:
+                logger.info(
+                    "MCP server idle for %.1f h (limit %.1f h); exiting to release file handles.",
+                    idle / 3600, timeout / 3600,
+                )
+                os._exit(0)
+
+    t = threading.Thread(target=_watchdog, name="mcp-idle-watchdog", daemon=True)
+    t.start()
+
+
+def _maybe_eager_warmup_embedder(dim: Dimension) -> None:
+    raw = os.environ.get("ALT_MEMORY_EAGER_WARMUP", "").strip().lower()
+    if raw in ("", "0", "false", "no", "off"):
+        return
+    if raw not in ("1", "true", "yes", "on"):
+        logger.warning(
+            "ALT_MEMORY_EAGER_WARMUP=%r not recognized (use 1/true/yes/on); warmup disabled", raw
+        )
+        return
+    try:
+        dim.search("warmup", n_results=1)
+        logger.info("Eager warmup: embedder ready (palace=%s)", dim._base)
+    except Exception as exc:
+        logger.exception("Eager warmup failed (palace=%s): %s", dim._base, exc)
+
 
 VERSION = "4.2.0"
 MCP_PROTOCOL_VERSION = "2024-11-05"
@@ -77,7 +167,7 @@ def _build_tool_definitions() -> list[dict]:
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query text"},
-                    "n_results": {"type": "number", "description": "Max results to return (default 10)"},
+                    "n_results": {"type": "integer", "description": "Max results to return (default 10)"},
                     "realm": {"type": "string", "description": "Restrict to a realm"},
                     "domain": {"type": "string", "description": "Restrict to a domain"},
                     "mode": {"type": "string", "description": "Search mode: hybrid, vector, or keyword"},
@@ -91,9 +181,32 @@ def _build_tool_definitions() -> list[dict]:
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
-            "name": "list_wings",
+            "name": "list_realms",
             "description": "List all realms in the dimension",
             "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "create_realm",
+            "description": "Create a new realm",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Realm name"},
+                    "description": {"type": "string", "description": "Optional description"},
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "delete_realm",
+            "description": "Delete a realm and all its domains and entities",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Realm name"},
+                },
+                "required": ["name"],
+            },
         },
         {
             "name": "list_domains",
@@ -103,6 +216,31 @@ def _build_tool_definitions() -> list[dict]:
                 "properties": {
                     "realm": {"type": "string", "description": "Realm name (optional; lists all domains if omitted)"},
                 },
+            },
+        },
+        {
+            "name": "create_domain",
+            "description": "Create a new domain in a realm",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "realm": {"type": "string", "description": "Realm name"},
+                    "name": {"type": "string", "description": "Domain name"},
+                    "description": {"type": "string", "description": "Optional description"},
+                },
+                "required": ["realm", "name"],
+            },
+        },
+        {
+            "name": "delete_domain",
+            "description": "Delete a domain from a realm",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "realm": {"type": "string", "description": "Realm name"},
+                    "name": {"type": "string", "description": "Domain name"},
+                },
+                "required": ["realm", "name"],
             },
         },
         {
@@ -116,6 +254,7 @@ def _build_tool_definitions() -> list[dict]:
                     "content": {"type": "string", "description": "Entity content text"},
                     "metadata": {"type": "object", "description": "Optional metadata dict"},
                     "source_file": {"type": "string", "description": "Optional source file path"},
+                    "entity_id": {"type": "string", "description": "Optional entity ID (auto-generated if omitted)"},
                 },
                 "required": ["realm", "domain", "content"],
             },
@@ -153,6 +292,7 @@ def _build_tool_definitions() -> list[dict]:
                     "object": {"type": "string", "description": "Object entity"},
                     "valid_from": {"type": "string", "description": "ISO date when fact becomes valid"},
                     "valid_to": {"type": "string", "description": "ISO date when fact expires"},
+                    "source": {"type": "string", "description": "Optional source identifier"},
                 },
                 "required": ["subject", "predicate", "object"],
             },
@@ -167,6 +307,7 @@ def _build_tool_definitions() -> list[dict]:
                     "predicate": {"type": "string", "description": "Filter by predicate"},
                     "as_of": {"type": "string", "description": "ISO date to query temporally"},
                     "all": {"type": "boolean", "description": "Return all facts"},
+                    "direction": {"type": "string", "description": "Query direction: outgoing, incoming, both (default both)"},
                 },
             },
         },
@@ -179,6 +320,7 @@ def _build_tool_definitions() -> list[dict]:
                     "subject": {"type": "string", "description": "Subject entity"},
                     "predicate": {"type": "string", "description": "Relationship type"},
                     "object": {"type": "string", "description": "Object entity"},
+                    "ended": {"type": "string", "description": "ISO date when fact stopped being true (default today)"},
                 },
                 "required": ["subject", "predicate", "object"],
             },
@@ -197,6 +339,7 @@ def _build_tool_definitions() -> list[dict]:
                     "agent": {"type": "string", "description": "Agent name"},
                     "entry": {"type": "string", "description": "Diary entry text"},
                     "topic": {"type": "string", "description": "Topic tag"},
+                    "realm": {"type": "string", "description": "Target realm (default agent_<name>)"},
                 },
                 "required": ["agent", "entry"],
             },
@@ -208,7 +351,8 @@ def _build_tool_definitions() -> list[dict]:
                 "type": "object",
                 "properties": {
                     "agent": {"type": "string", "description": "Agent name"},
-                    "last_n": {"type": "number", "description": "Number of entries to read"},
+                    "last_n": {"type": "integer", "description": "Number of entries to read"},
+                    "realm": {"type": "string", "description": "Realm to read from (default agent_<name>)"},
                 },
                 "required": ["agent"],
             },
@@ -221,8 +365,8 @@ def _build_tool_definitions() -> list[dict]:
                 "properties": {
                     "realm": {"type": "string", "description": "Filter by realm"},
                     "domain": {"type": "string", "description": "Filter by domain"},
-                    "limit": {"type": "number", "description": "Max results (default 20)"},
-                    "offset": {"type": "number", "description": "Offset for pagination"},
+                    "limit": {"type": "integer", "description": "Max results (default 20)"},
+                    "offset": {"type": "integer", "description": "Offset for pagination"},
                 },
             },
         },
@@ -236,6 +380,7 @@ def _build_tool_definitions() -> list[dict]:
                     "realm": {"type": "string", "description": "Target realm"},
                     "domain": {"type": "string", "description": "Target domain"},
                     "source": {"type": "string", "description": "Optional source identifier"},
+                    "chunk": {"type": "boolean", "description": "Chunk long text into multiple entities (default true)"},
                 },
                 "required": ["text", "realm", "domain"],
             },
@@ -247,6 +392,7 @@ def _build_tool_definitions() -> list[dict]:
                 "type": "object",
                 "properties": {
                     "text": {"type": "string", "description": "Text to compress"},
+                    "max_len": {"type": "integer", "description": "Maximum output length (default 500)"},
                 },
                 "required": ["text"],
             },
@@ -384,7 +530,7 @@ def _build_tool_definitions() -> list[dict]:
                 "type": "object",
                 "properties": {
                     "start_domain": {"type": "string", "description": "Domain to start from"},
-                    "max_hops": {"type": "number", "description": "How many connections to follow (default: 2)"},
+                    "max_hops": {"type": "integer", "description": "How many connections to follow (default: 2)"},
                 },
                 "required": ["start_domain"],
             },
@@ -469,6 +615,27 @@ def _build_tool_definitions() -> list[dict]:
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
+            "name": "get_backend",
+            "description": "Get the current vector store backend (faiss or chroma)",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "set_backend",
+            "description": "Switch between vector store backends (faiss or chroma) and optionally reindex all entities",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "backend": {
+                        "type": "string",
+                        "description": "Backend name: faiss or chroma",
+                        "enum": ["faiss", "chroma"],
+                    },
+                    "reindex": {"type": "boolean", "description": "Re-embed all existing entities (default true)"},
+                },
+                "required": ["backend"],
+            },
+        },
+        {
             "name": "set_embedder",
             "description": "Switch to a different embedding model and optionally reindex all entities",
             "inputSchema": {
@@ -476,7 +643,7 @@ def _build_tool_definitions() -> list[dict]:
                 "properties": {
                     "model": {"type": "string", "description": "Embedder name: sentence, spacy, numpy, minilm, embeddinggemma"},
                     "device": {"type": "string", "description": "ONNX device: auto, cpu, cuda, coreml, dml (default from config)"},
-                    "reindex": {"type": "boolean", "description": "Re-embed all existing drawers (default true)"},
+                    "reindex": {"type": "boolean", "description": "Re-embed all existing entities (default true)"},
                 },
                 "required": ["model"],
             },
@@ -533,7 +700,7 @@ def _build_tool_definitions() -> list[dict]:
 class MCPServer:
     """JSON-RPC MCP server dispatching to Dimension operations."""
 
-    def __init__(self, dim: "Dimension"):
+    def __init__(self, dim: Dimension):
         self.dim = dim
         self.entity_registry = EntityRegistry(dim)
         self.memory_stack = MemoryStack(dim) if HAS_LAYERS else None
@@ -548,7 +715,6 @@ class MCPServer:
         # MCP protocol methods
         self._register("initialize", self._mcp_initialize, [])
         self._register("notifications/initialized", self._mcp_noop, [])
-        self._register("notifications/notified", self._mcp_noop, [])
         self._register("tools/list", self._mcp_tools_list, [])
         self._register("tools/call", self._mcp_tools_call, ["name", "arguments"])
 
@@ -558,9 +724,9 @@ class MCPServer:
         self._register("init_dimension", self._init_dimension, [])
         self._register("close_dimension", self._close_dimension, [])
 
-        self._register("list_wings", self._list_wings, [])
-        self._register("create_wing", self._create_wing, ["name"])
-        self._register("delete_wing", self._delete_wing, ["name"])
+        self._register("list_realms", self._list_realms, [])
+        self._register("create_realm", self._create_realm, ["name"])
+        self._register("delete_realm", self._delete_realm, ["name"])
 
         self._register("list_domains", self._list_domains, [])
         self._register("create_domain", self._create_domain, ["realm", "name"])
@@ -611,17 +777,22 @@ class MCPServer:
         self._register("sync", self._sync, [])
         self._register("reconnect", self._reconnect, [])
         self._register("hook_settings", self._hook_settings, [])
+        self._register("get_backend", self._get_backend, [])
+        self._register("set_backend", self._set_backend, ["backend"])
         self._register("set_embedder", self._set_embedder, ["model"])
         self._register("get_default_embedder", self._get_default_embedder, [])
         self._register("set_default_embedder", self._set_default_embedder, ["model"])
         self._register("list_agents", self._list_agents, [])
         self._register("get_people_map", self._get_people_map, [])
-        self._register("set_people_map", self._set_people_map, [])
+        self._register("set_people_map", self._set_people_map, ["map"])
 
     def handle_request(self, raw: str) -> str | None:
         """Process one JSON-RPC request line, return JSON response string.
         Returns None for notifications (no ``id`` field).
         """
+        global _last_request_time
+        _last_request_time = time.monotonic()
+
         try:
             req = json.loads(raw)
         except json.JSONDecodeError:
@@ -680,8 +851,14 @@ class MCPServer:
         if handler_info is None:
             raise ValueError(f"Unknown tool: {name}")
         handler, required = handler_info
+        missing = [p for p in required if p not in args or args[p] is None or (isinstance(args[p], str) and not args[p].strip())]
+        if missing:
+            raise ValueError(f"Missing required parameter(s): {', '.join(missing)}")
         result = handler(args)
-        text = json.dumps(result, indent=2, ensure_ascii=False) if not isinstance(result, str) else str(result)
+        if isinstance(result, str):
+            text = result
+        else:
+            text = json.dumps(result, indent=2, ensure_ascii=False)
         return {"content": [{"type": "text", "text": text}]}
 
     # -- Handler implementations ------------------------------------------------
@@ -699,14 +876,14 @@ class MCPServer:
         self.dim.close()
         return {"closed": True}
 
-    def _list_wings(self, params: dict) -> list:
+    def _list_realms(self, params: dict) -> list:
         return self.dim.list_realms()
 
-    def _create_wing(self, params: dict) -> dict:
+    def _create_realm(self, params: dict) -> dict:
         name = self.dim.get_or_create_realm(params["name"], params.get("description", ""))
         return {"name": name}
 
-    def _delete_wing(self, params: dict) -> dict:
+    def _delete_realm(self, params: dict) -> dict:
         return {"deleted": self.dim.delete_realm(params["name"])}
 
     def _list_domains(self, params: dict) -> list:
@@ -720,6 +897,13 @@ class MCPServer:
         return {"deleted": self.dim.delete_domain(params["realm"], params["name"])}
 
     def _add_entity(self, params: dict) -> dict:
+        _wal_log(str(self.dim._base), "add_entity", {
+            "realm": params["realm"],
+            "domain": params["domain"],
+            "content": params["content"],
+            "metadata": params.get("metadata"),
+            "entity_id": params.get("entity_id"),
+        })
         did = self.dim.add_entity(
             params["realm"],
             params["domain"],
@@ -731,10 +915,10 @@ class MCPServer:
         return {"entity_id": did}
 
     def _get_entity(self, params: dict) -> dict | None:
-        drawer = self.dim.get_entity(params["entity_id"])
-        if drawer is None:
+        entity = self.dim.get_entity(params["entity_id"])
+        if entity is None:
             return {"found": False}
-        return drawer
+        return entity
 
     def _list_entities(self, params: dict) -> list:
         return self.dim.list_entities(
@@ -745,6 +929,13 @@ class MCPServer:
         )
 
     def _update_entity(self, params: dict) -> dict:
+        _wal_log(str(self.dim._base), "update_entity", {
+            "entity_id": params["entity_id"],
+            "content": params.get("content"),
+            "metadata": params.get("metadata"),
+            "realm": params.get("realm"),
+            "domain": params.get("domain"),
+        })
         ok = self.dim.update_entity(
             params["entity_id"],
             content=params.get("content"),
@@ -755,6 +946,7 @@ class MCPServer:
         return {"updated": ok}
 
     def _delete_entity(self, params: dict) -> dict:
+        _wal_log(str(self.dim._base), "delete_entity", {"entity_id": params["entity_id"]})
         return {"deleted": self.dim.delete_entity(params["entity_id"])}
 
     def _search(self, params: dict) -> list:
@@ -784,6 +976,14 @@ class MCPServer:
         return {"duplicate": False}
 
     def _kg_add(self, params: dict) -> dict:
+        _wal_log(str(self.dim._base), "kg_add", {
+            "subject": params["subject"],
+            "predicate": params["predicate"],
+            "object": params["object"],
+            "valid_from": params.get("valid_from"),
+            "valid_to": params.get("valid_to"),
+            "source": params.get("source", ""),
+        })
         fid = self.dim.kg.add(
             params["subject"],
             params["predicate"],
@@ -805,6 +1005,12 @@ class MCPServer:
         )
 
     def _kg_invalidate(self, params: dict) -> dict:
+        _wal_log(str(self.dim._base), "kg_invalidate", {
+            "subject": params["subject"],
+            "predicate": params["predicate"],
+            "object": params["object"],
+            "ended": params.get("ended"),
+        })
         n = self.dim.kg.invalidate(
             params["subject"],
             params["predicate"],
@@ -817,6 +1023,12 @@ class MCPServer:
         return self.dim.kg.stats()
 
     def _diary_write(self, params: dict) -> dict:
+        _wal_log(str(self.dim._base), "diary_write", {
+            "agent": params["agent"],
+            "entry": params["entry"],
+            "topic": params.get("topic", "general"),
+            "realm": params.get("realm", ""),
+        })
         wing = self.dim.diary_write(
             params["agent"],
             params["entry"],
@@ -892,6 +1104,7 @@ class MCPServer:
         return aaak_parse_entry(params["text"])
 
     def _rebuild_fts(self, params: dict) -> dict:
+        _wal_log(str(self.dim._base), "rebuild_fts", {})
         self.dim.rebuild_fts()
         return {"rebuilt": True}
 
@@ -900,10 +1113,10 @@ class MCPServer:
 
     def _create_tunnel(self, params: dict) -> dict:
         tunnel = dim_graph.create_tunnel(
-            source_realm=params.get("source_wing", params.get("source_realm", "")),
-            source_domain=params.get("source_room", params.get("source_domain", "")),
-            target_realm=params.get("target_wing", params.get("target_realm", "")),
-            target_domain=params.get("target_room", params.get("target_domain", "")),
+            source_realm=params.get("source_realm", ""),
+            source_domain=params.get("source_domain", ""),
+            target_realm=params.get("target_realm", ""),
+            target_domain=params.get("target_domain", ""),
             label=params.get("label", ""),
             dimension=self.dim,
             source_entity_id=params.get("source_entity_id"),
@@ -919,15 +1132,15 @@ class MCPServer:
 
     def _traverse(self, params: dict) -> list:
         return dim_graph.traverse(
-            start_domain=params.get("start_room", params.get("start_domain", "")),
+            start_domain=params.get("start_domain", ""),
             dimension=self.dim,
             max_hops=params.get("max_hops", 2),
         )
 
     def _find_tunnels(self, params: dict) -> list:
         return dim_graph.find_tunnels(
-            realm_a=params.get("realm_a", params.get("wing_a")),
-            realm_b=params.get("realm_b", params.get("wing_b")),
+            realm_a=params.get("realm_a"),
+            realm_b=params.get("realm_b"),
             dimension=self.dim,
         )
 
@@ -951,9 +1164,14 @@ class MCPServer:
         return self.dim.memories_filed_away()
 
     def _sync(self, params: dict) -> dict:
+        _wal_log(str(self.dim._base), "sync", {
+            "project_dir": params.get("project_dir"),
+            "realm": params.get("realm"),
+            "apply": params.get("apply", False),
+        })
         project_dirs = [params["project_dir"]] if params.get("project_dir") else None
         report = sync_dimension(
-            dim_path=self.dim._base,
+            dimension_path=str(self.dim._base),
             project_dirs=project_dirs,
             realm=params.get("realm"),
             dry_run=not params.get("apply", False),
@@ -972,6 +1190,15 @@ class MCPServer:
                 desktop_toast=params.get("desktop_toast"),
             )
         return config.get_hook_settings()
+
+    def _get_backend(self, params: dict) -> dict:
+        return {"backend": getattr(self.dim, "_backend", "faiss")}
+
+    def _set_backend(self, params: dict) -> dict:
+        return self.dim.set_backend(
+            backend=params["backend"],
+            reindex=params.get("reindex", True),
+        )
 
     def _set_embedder(self, params: dict) -> dict:
         return self.dim.set_embedder(
@@ -1083,7 +1310,7 @@ if HAS_HTTP:
             httpd.shutdown()
 
 
-def run_server(dim: "Dimension", host: str = "127.0.0.1", port: int = 8316,
+def run_server(dim: Dimension, host: str = "127.0.0.1", port: int = 8316,
                transport: str = "stdio") -> None:
     """Run the MCP server.
 
@@ -1099,6 +1326,9 @@ def run_server(dim: "Dimension", host: str = "127.0.0.1", port: int = 8316,
         ``"stdio"`` (read/write JSON-RPC on stdin/stdout) or
         ``"sse"`` (HTTP server with ``GET /health`` and ``POST /mcp``).
     """
+    _maybe_eager_warmup_embedder(dim)
+    _start_idle_exit_watchdog()
+
     server = MCPServer(dim)
 
     if transport == "stdio":

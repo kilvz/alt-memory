@@ -5,6 +5,8 @@ locations, dates, concepts, events) using pure pattern matching with
 no external ML models or dependencies beyond stdlib.
 """
 
+from __future__ import annotations
+
 import functools
 import json
 import os
@@ -65,7 +67,7 @@ def _apply_known_systems_prepass(text: str) -> tuple[str, dict[str, int]]:
         return text, counts
     working = list(text)
     for name, pattern in compounds:
-        for m in pattern.finditer(text):
+        for m in pattern.finditer("".join(working)):
             counts[name] = counts.get(name, 0) + 1
             for i in range(m.start(), m.end()):
                 working[i] = " "
@@ -485,7 +487,7 @@ class EntityDetector:
 
         self._cap_word_re = re.compile(r"\b([A-Z][a-z]+)\b")
 
-        self._capital_pascal_re = re.compile(r"\b([A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+)\b")
+        self._capital_pascal_re = re.compile(r"\b([A-Z]+[a-z0-9]*(?:[A-Z][a-z0-9]*)+)\b")
 
     # ------------------------------------------------------------------
     # Public API
@@ -639,7 +641,6 @@ class EntityDetector:
                 continue
 
             length = len(words)
-            at_sentence_start = self._is_sentence_start(seq_start, text)
 
             # Check known-entity lookups first (these override stoplist membership)
             if name in _KNOWN_TECHNOLOGIES:
@@ -879,10 +880,10 @@ class EntityDetector:
                     continue
 
                 # reject: r3
-                if token.startswith("r"):
+                if token.startswith("r") and not token.startswith("rn"):
                     try:
                         idx = int(token[1:]) - 1
-                        if 0 <= idx < len(detected):
+                        if 0 <= idx < len(detected) and detected[idx] not in confirmed:
                             rejected.append(detected[idx])
                             print(f"    → rejected [{token[1:]}] {detected[idx]['name']}")
                     except (ValueError, IndexError):
@@ -1194,10 +1195,6 @@ def detect_entities(
         "topics": [],
         "uncertain": uncertain[:8],
     }
-
-    if corpus_origin is not None:
-        from alt_memory.entity_detector import _apply_corpus_origin
-        detected = _apply_corpus_origin(detected, corpus_origin)
 
     return detected
 

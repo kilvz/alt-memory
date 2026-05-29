@@ -7,7 +7,6 @@ Two ways to define rooms without calling any AI:
 
 import logging
 import os
-import sys
 import yaml
 from pathlib import Path
 from collections import defaultdict
@@ -193,8 +192,10 @@ def save_config(project_dir: str, project_name: str, rooms: list):
         "domains": [{"name": r["name"], "description": r["description"], "keywords": r.get("keywords", [r["name"]])} for r in rooms],
     }
     config_path = Path(project_dir).expanduser().resolve() / ".alt-memory.yaml"
-    with open(config_path, "w") as f:
+    tmp_path = config_path.with_suffix(".yaml.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    os.replace(str(tmp_path), str(config_path))
 
     print(f"\n  Config saved: {config_path}")
     print("\n  Next step:")
@@ -207,8 +208,7 @@ def detect_rooms_local(project_dir: str, yes: bool = False):
     project_name = normalize_realm_name(project_path.name)
 
     if not project_path.exists():
-        print(f"ERROR: Directory not found: {project_dir}")
-        sys.exit(1)
+        raise FileNotFoundError(f"Directory not found: {project_dir}")
 
     files = _walk_files(project_dir)
 

@@ -36,17 +36,21 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from itertools import combinations
 from typing import Optional
+import threading
 
+from alt_memory.config import AltMemoryConfig
 from alt_memory.dynamics import initialize_dynamics_fields
 from alt_memory.dimension import Dimension
 
 logger = logging.getLogger("alt_memory_hallways")
 
-# Persistence target. Mirrors the original ``_HALLWAY_FILE`` at
-# ``~/.alt-memory/hallways.json``
-_HALLWAY_FILE = os.path.join(os.path.expanduser("~"), ".alt-memory", "hallways.json")
+# Derived from AltMemoryConfig so it respects the configured dim_path.
+def _hallway_file() -> str:
+    return AltMemoryConfig().hallway_file
 
 _SCHEMA_VERSION = 1
+
+_hallway_lock = threading.Lock()
 
 
 __all__ = [
@@ -57,16 +61,16 @@ __all__ = [
 
 
 # --------------------------------------------------------------------------
-# Persistence — JSON file at _HALLWAY_FILE, restricted perms (0600) on POSIX
+# Persistence — JSON file at _hallway_file(), restricted perms (0600) on POSIX
 # --------------------------------------------------------------------------
 
 
 def _load_hallways() -> list[dict]:
     """Read all hallway records. Returns ``[]`` if the file is missing or corrupt."""
-    if not os.path.exists(_HALLWAY_FILE):
+    if not os.path.exists(_hallway_file()):
         return []
     try:
-        with open(_HALLWAY_FILE, encoding="utf-8") as f:
+        with open(_hallway_file(), encoding="utf-8") as f:
             raw = json.load(f)
     except (OSError, json.JSONDecodeError):
         logger.debug("hallways: load failed, treating as empty", exc_info=True)
@@ -79,14 +83,14 @@ def _load_hallways() -> list[dict]:
 
 
 def _save_hallways(hallways: list[dict]) -> None:
-    """Atomically persist hallway records to _HALLWAY_FILE.
+    """Atomically persist hallway records to _hallway_file().
 
     Uses an os.replace temp-file dance so a crash mid-write doesn't
     corrupt the file. POSIX permission is restricted to 0600 because
     hallways reveal within-realm entity connections that the user may
     not want world-readable.
     """
-    directory = os.path.dirname(_HALLWAY_FILE)
+    directory = os.path.dirname(_hallway_file())
     os.makedirs(directory, exist_ok=True)
     payload = {
         "schema_version": _SCHEMA_VERSION,
@@ -101,7 +105,7 @@ def _save_hallways(hallways: list[dict]) -> None:
         except OSError:
             # Non-POSIX systems may not support chmod; not fatal.
             pass
-        os.replace(tmp_path, _HALLWAY_FILE)
+        os.replace(tmp_path, _hallway_file())
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -119,8 +123,8 @@ def _parse_entities(value) -> list[str]:
     """Drawer ``entities`` metadata is a semicolon-separated string. Parse it.
 
     Returns a deterministic *list* (not a set) because order matters for
-    the deduplication semantics below: a drawer that mentions ``Aya;Aya``
-    should only contribute one Aya to the entity set for that drawer.
+    the deduplication semantics below: an entity that mentions ``Aya;Aya``
+    should only contribute one Aya to the entity set for that entity.
     """
     if not value:
         return []
@@ -190,16 +194,18 @@ def compute_hallways_for_realm(
 
     # 1. Open dimension and query entities for this realm.
     try:
-        palace = Dimension(dim_path)
-        palace.init()
-        conn = sqlite3.connect(str(palace._base / "dimension.db"))
-        conn.row_factory = sqlite3.Row
+        dim = Dimension(dim_path)
+        dim.init()
+        conn = None
         try:
+            conn = sqlite3.connect(str(dim._base / "dimension.db"))
+            conn.row_factory = sqlite3.Row
             rows = conn.execute(
             "SELECT id, content, metadata FROM entities WHERE realm = ?", (realm,)
         ).fetchall()
         finally:
-            conn.close()
+            if conn:
+                conn.close()
     except Exception:
         logger.warning(
             "compute_hallways_for_realm: query failed for %s", realm, exc_info=True
@@ -216,7 +222,10 @@ def compute_hallways_for_realm(
     pair_rooms: dict[tuple[str, str], set[str]] = defaultdict(set)
 
     for row in rows:
-        meta = json.loads(row["metadata"])
+        try:
+            meta = json.loads(row["metadata"])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            meta = {}
         # Sentinel entities carry no real content — skip them.
         if meta.get("is_sentinel"):
             continue
@@ -249,55 +258,56 @@ def compute_hallways_for_realm(
     #    across recomputes. Without this preservation, every mine wipes
     #    the connection weights accumulated through use — defeating the
     #    living-connection layer entirely.
-    existing = _load_hallways()
-    existing_dynamics_lookup: dict = {}
-    for h in existing:
-        if h.get("realm") != realm:
-            continue
-        # Canonicalize the lookup key by sorting the entity pair — must
-        # match the symmetric ID generation in _hallway_id (which also
-        # sorts). Without this, a persisted record with reversed entity
-        # order would silently miss the lookup and lose its accumulated
-        # dynamics on every recompute.
-        key = tuple(sorted([h.get("entity_a"), h.get("entity_b")]))
-        # Only copy the fields the dynamics layer cares about; everything
-        # else is recomputed deterministically from the entity set.
-        existing_dynamics_lookup[key] = {
-            k: h[k] for k in ("strength", "stability", "last_activated", "access_count") if k in h
-        }
+    with _hallway_lock:
+        existing = _load_hallways()
+        existing_dynamics_lookup: dict = {}
+        for h in existing:
+            if h.get("realm") != realm:
+                continue
+            # Canonicalize the lookup key by sorting the entity pair — must
+            # match the symmetric ID generation in _hallway_id (which also
+            # sorts). Without this, a persisted record with reversed entity
+            # order would silently miss the lookup and lose its accumulated
+            # dynamics on every recompute.
+            key = tuple(sorted([h.get("entity_a"), h.get("entity_b")], key=lambda x: (x is None, x)))
+            # Only copy the fields the dynamics layer cares about; everything
+            # else is recomputed deterministically from the entity set.
+            existing_dynamics_lookup[key] = {
+                k: h[k] for k in ("strength", "stability", "last_activated", "access_count") if k in h
+            }
 
-    created: list[dict] = []
-    created_at = datetime.now(timezone.utc).isoformat()
-    for key in sorted(pair_counts.keys()):
-        count = pair_counts[key]
-        if count < min_count:
-            continue
-        entity_a, entity_b = key
-        rooms = sorted(pair_rooms.get(key, set()))
-        room_summary = ", ".join(rooms[:3]) if rooms else "(no domain tags)"
-        if len(rooms) > 3:
-            room_summary += f", +{len(rooms) - 3} more"
-        record = {
-            "id": _hallway_id(realm, entity_a, entity_b),
-            "realm": realm,
-            "entity_a": entity_a,
-            "entity_b": entity_b,
-            "co_occurrence_count": count,
-            "domains": rooms,
-            "label": f"{entity_a} \u2194 {entity_b} (co-occur in {count} entities across {len(rooms) or 'no'} domain{'s' if len(rooms) != 1 else ''}: {room_summary})",
-            "created_at": created_at,
-            "created_by": "auto",
-        }
-        # Apply preserved dynamics if this entity pair existed in the
-        # prior realm snapshot, then initialize any missing fields.
-        preserved = existing_dynamics_lookup.get(key, {})
-        record.update(preserved)
-        initialize_dynamics_fields(record)
-        created.append(record)
+        created: list[dict] = []
+        created_at = datetime.now(timezone.utc).isoformat()
+        for key in sorted(pair_counts.keys()):
+            count = pair_counts[key]
+            if count < min_count:
+                continue
+            entity_a, entity_b = key
+            rooms = sorted(pair_rooms.get(key, set()))
+            room_summary = ", ".join(rooms[:3]) if rooms else "(no domain tags)"
+            if len(rooms) > 3:
+                room_summary += f", +{len(rooms) - 3} more"
+            record = {
+                "id": _hallway_id(realm, entity_a, entity_b),
+                "realm": realm,
+                "entity_a": entity_a,
+                "entity_b": entity_b,
+                "co_occurrence_count": count,
+                "domains": rooms,
+                "label": f"{entity_a} \u2194 {entity_b} (co-occur in {count} entities across {len(rooms) or 'no'} domain{'s' if len(rooms) != 1 else ''}: {room_summary})",
+                "created_at": created_at,
+                "created_by": "auto",
+            }
+            # Apply preserved dynamics if this entity pair existed in the
+            # prior realm snapshot, then initialize any missing fields.
+            preserved = existing_dynamics_lookup.get(key, {})
+            record.update(preserved)
+            initialize_dynamics_fields(record)
+            created.append(record)
 
-    # 4. Persist — preserve other-realm records, replace this realm's records.
-    preserved_other_realms = [h for h in existing if h.get("realm") != realm]
-    _save_hallways(preserved_other_realms + created)
+        # 4. Persist — preserve other-realm records, replace this realm's records.
+        preserved_other_realms = [h for h in existing if h.get("realm") != realm]
+        _save_hallways(preserved_other_realms + created)
 
     return created
 
@@ -309,17 +319,19 @@ def compute_hallways_for_realm(
 
 def list_hallways(realm: Optional[str] = None) -> list[dict]:
     """List hallway records. Filter by ``realm`` if specified."""
-    all_hallways = _load_hallways()
-    if realm is None:
-        return list(all_hallways)
-    return [h for h in all_hallways if h.get("realm") == realm]
+    with _hallway_lock:
+        all_hallways = _load_hallways()
+        if realm is None:
+            return list(all_hallways)
+        return [h for h in all_hallways if h.get("realm") == realm]
 
 
 def delete_hallway(hallway_id: str) -> bool:
     """Remove one hallway record by id. Returns True if a record was removed."""
-    hallways = _load_hallways()
-    filtered = [h for h in hallways if h.get("id") != hallway_id]
-    if len(filtered) == len(hallways):
-        return False
-    _save_hallways(filtered)
-    return True
+    with _hallway_lock:
+        hallways = _load_hallways()
+        filtered = [h for h in hallways if h.get("id") != hallway_id]
+        if len(filtered) == len(hallways):
+            return False
+        _save_hallways(filtered)
+        return True

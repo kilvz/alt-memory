@@ -100,7 +100,8 @@ def sanitize_query(raw_query: str) -> dict:
             if MIN_QUERY_LENGTH <= len(frag) <= MAX_QUERY_LENGTH:
                 return frag
 
-        return candidate[-MAX_QUERY_LENGTH:].strip()
+        candidate = candidate.strip()
+        return candidate[-MAX_QUERY_LENGTH:]
 
     # --- Step 1: Short query passthrough ---
     if original_length <= SAFE_QUERY_LENGTH:
@@ -179,7 +180,7 @@ def sanitize_query(raw_query: str) -> dict:
 
     # --- Step 4: Tail truncation (fallback) ---
     # Nothing worked — just take the last MAX_QUERY_LENGTH characters.
-    candidate = raw_query[-MAX_QUERY_LENGTH:].strip()
+    candidate = raw_query.strip()[-MAX_QUERY_LENGTH:]
     logger.warning(
         "Query sanitized: %d → %d chars (method=tail_truncation)", original_length, len(candidate)
     )

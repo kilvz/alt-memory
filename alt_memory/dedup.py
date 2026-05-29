@@ -11,14 +11,14 @@ from alt_memory.dimension import Dimension
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_THRESHOLD = 0.15
+DEFAULT_THRESHOLD = 0.9
 MIN_ENTITIES_TO_CHECK = 5
 
 
 def _get_dimension_path():
     try:
         from alt_memory.config import AltMemoryConfig
-        return AltMemoryConfig().dimension_path
+        return AltMemoryConfig().dim_path
     except Exception:
         return os.path.join(os.path.expanduser("~"), ".alt-memory")
 
@@ -63,7 +63,7 @@ def dedup_source_group(dimension, entity_ids, threshold=DEFAULT_THRESHOLD, dry_r
 
     for eid in entity_ids:
         doc = dimension.get_entity(eid)
-        if not doc or not doc["content"] or len(doc["content"]) < 20:
+        if not doc or not doc["content"] or len(doc["content"]) <= 3:
             to_delete.append(eid)
             continue
 
@@ -72,12 +72,12 @@ def dedup_source_group(dimension, entity_ids, threshold=DEFAULT_THRESHOLD, dry_r
             continue
 
         try:
-            results = dimension.search(doc["content"], n_results=min(len(kept), 5), mode="vector")
+            results = dimension.search(doc["content"], n_results=max(5, len(kept) + 1), mode="vector")
             kept_ids_set = {k[0] for k in kept}
 
             is_dup = False
             for r in results:
-                if r.id in kept_ids_set and r.distance < threshold:
+                if r.id in kept_ids_set and r.distance >= threshold:
                     is_dup = True
                     break
 
@@ -99,19 +99,22 @@ def show_stats(dimension_path=None):
     dimension_path = dimension_path or _get_dimension_path()
     dimension = Dimension(dimension_path)
     dimension.init()
-    groups = get_source_groups(dimension)
+    try:
+        groups = get_source_groups(dimension)
 
-    total_entities = sum(len(ids) for ids in groups.values())
-    print(f"\n  Sources with {MIN_ENTITIES_TO_CHECK}+ entities: {len(groups)}")
-    print(f"  Total entities in those sources: {total_entities:,}")
+        total_entities = sum(len(ids) for ids in groups.values())
+        print(f"\n  Sources with {MIN_ENTITIES_TO_CHECK}+ entities: {len(groups)}")
+        print(f"  Total entities in those sources: {total_entities:,}")
 
-    print("\n  Top 15 by entity count:")
-    sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
-    for src, ids in sorted_groups[:15]:
-        print(f"    {len(ids):4d}  {src[:65]}")
+        print("\n  Top 15 by entity count:")
+        sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
+        for src, ids in sorted_groups[:15]:
+            print(f"    {len(ids):4d}  {src[:65]}")
 
-    estimated_dups = sum(int(len(ids) * 0.4) for ids in groups.values() if len(ids) > 20)
-    print(f"\n  Estimated duplicates (groups > 20): ~{estimated_dups:,}")
+        estimated_dups = sum(int(len(ids) * 0.4) for ids in groups.values() if len(ids) > 20)
+        print(f"\n  Estimated duplicates (groups > 20): ~{estimated_dups:,}")
+    finally:
+        dimension.close()
 
 
 def dedup_dimension(
@@ -125,53 +128,56 @@ def dedup_dimension(
     dimension_path = dimension_path or _get_dimension_path()
     dimension = Dimension(dimension_path)
     dimension.init()
+    try:
 
-    print(f"\n{'=' * 55}")
-    print("  alt-memory Deduplicator")
-    print(f"{'=' * 55}")
+        print(f"\n{'=' * 55}")
+        print("  alt-memory Deduplicator")
+        print(f"{'=' * 55}")
 
-    status = dimension.status()
-    print(f"  Dimension: {dimension_path}")
-    print(f"  Entities: {status['entities']:,}")
-    print(f"  Threshold: {threshold}")
-    print(f"  Mode: {'DRY RUN' if dry_run else 'LIVE'}")
-    print(f"{'─' * 55}")
+        status = dimension.status()
+        print(f"  Dimension: {dimension_path}")
+        print(f"  Entities: {status['entities']:,}")
+        print(f"  Threshold: {threshold}")
+        print(f"  Mode: {'DRY RUN' if dry_run else 'LIVE'}")
+        print(f"{'─' * 55}")
 
-    if realm:
-        print(f"  Realm: {realm}")
-    groups = get_source_groups(dimension, min_count, source_pattern, realm=realm)
-    print(f"\n  Sources to check: {len(groups)}")
+        if realm:
+            print(f"  Realm: {realm}")
+        groups = get_source_groups(dimension, min_count, source_pattern, realm=realm)
+        print(f"\n  Sources to check: {len(groups)}")
 
-    t0 = time.time()
-    total_kept = 0
-    total_deleted = 0
+        t0 = time.time()
+        total_kept = 0
+        total_deleted = 0
 
-    sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
+        sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
 
-    for i, (src, entity_ids) in enumerate(sorted_groups):
-        kept, deleted = dedup_source_group(dimension, entity_ids, threshold, dry_run)
-        total_kept += len(kept)
-        total_deleted += len(deleted)
+        for i, (src, entity_ids) in enumerate(sorted_groups):
+            kept, deleted = dedup_source_group(dimension, entity_ids, threshold, dry_run)
+            total_kept += len(kept)
+            total_deleted += len(deleted)
 
-        if deleted:
-            print(
-                f"  [{i + 1:3d}/{len(groups)}] "
-                f"{src[:50]:50s} {len(entity_ids):4d} \u2192 {len(kept):4d}  "
-                f"(-{len(deleted)})"
-            )
+            if deleted:
+                print(
+                    f"  [{i + 1:3d}/{len(groups)}] "
+                    f"{src[:50]:50s} {len(entity_ids):4d} \u2192 {len(kept):4d}  "
+                    f"(-{len(deleted)})"
+                )
 
-    elapsed = time.time() - t0
+        elapsed = time.time() - t0
 
-    print(f"\n{'─' * 55}")
-    print(f"  Done in {elapsed:.1f}s")
-    print(
-        f"  Entities: {total_kept + total_deleted:,} \u2192 {total_kept:,}  (-{total_deleted:,} removed)"
-    )
+        print(f"\n{'─' * 55}")
+        print(f"  Done in {elapsed:.1f}s")
+        print(
+            f"  Entities: {total_kept + total_deleted:,} \u2192 {total_kept:,}  (-{total_deleted:,} removed)"
+        )
 
-    if dry_run:
-        print("\n  [DRY RUN] No changes written. Re-run without --dry-run to apply.")
+        if dry_run:
+            print("\n  [DRY RUN] No changes written. Re-run without --dry-run to apply.")
 
-    print(f"{'=' * 55}\n")
+        print(f"{'=' * 55}\n")
+    finally:
+        dimension.close()
 
 
 if __name__ == "__main__":

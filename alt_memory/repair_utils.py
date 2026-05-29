@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
-def sqlite_drawer_count(db_path: str, table: str = "drawers") -> Optional[int]:
-    """Count rows in the drawers table as ground truth.
+def sqlite_entity_count(db_path: str, table: str = "entities") -> Optional[int]:
+    """Count rows in the entities table as ground truth.
 
     Returns ``None`` when the DB is unreadable (missing file, locked,
     missing table) — callers treat ``None`` as "unknown".
@@ -93,7 +95,7 @@ def run_vacuum(db_path: str) -> None:
         logger.warning("VACUUM failed on %s", db_path, exc_info=True)
 
 
-def rebuild_fts5(db_path: str, fts_table: str = "drawers_fts") -> None:
+def rebuild_fts5(db_path: str, fts_table: str = "entities_fts") -> None:
     """Rebuild an FTS5 virtual table index.
 
     After mass deletes or collection rebuilds the FTS5 shadow tables can
@@ -144,6 +146,63 @@ def confirm_destructive_action(
         print("  Aborted.")
         return False
     return True
+
+
+def extract_via_sqlite(
+    dim_path: str,
+    batch_size: int = 1000,
+) -> list[tuple[str, str, str, dict]]:
+    """Yield ``(entity_id, realm, domain, content, metadata)`` tuples directly from SQLite.
+
+    Bypasses the vector store entirely — never opens a FAISS index or
+    ChromaDB client. This is the recovery path when the vector store is
+    corrupt but the SQLite ``entities`` table is intact.
+
+    Returns an empty list when ``dimension.db`` is missing or unreadable.
+    """
+    base = Path(dim_path).expanduser().resolve()
+    db_path = base / "dimension.db"
+    if not db_path.exists():
+        return []
+
+    rows: list[tuple[str, str, str, str, str]] = []
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        try:
+            cur = conn.execute(
+                "SELECT id, realm, domain, content, metadata FROM entities ORDER BY rowid"
+            )
+            batch: list[tuple[str, str, str, str, str]] = []
+            for row in cur:
+                batch.append(row)
+                if len(batch) >= batch_size:
+                    rows.extend(batch)
+                    batch = []
+            rows.extend(batch)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return []
+
+    result: list[tuple[str, str, str, dict]] = []
+    for rid, realm, domain, content, meta_json in rows:
+        try:
+            meta = json.loads(meta_json) if meta_json else {}
+        except (json.JSONDecodeError, TypeError):
+            meta = {}
+        result.append((rid, realm, domain, content, meta))
+    return result
+
+
+def _verify_entity_count(sqlite_count: int, extracted: int, label: str = "") -> None:
+    """Verify that extracted entity count matches the SQLite ground truth.
+
+    Raises ``RuntimeError`` when the counts diverge.
+    """
+    if sqlite_count != extracted:
+        raise RuntimeError(
+            f"{label} count mismatch: expected {sqlite_count}, got {extracted}"
+        )
 
 
 def close_sqlite_handles(db_path: str) -> None:

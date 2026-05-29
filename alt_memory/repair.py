@@ -18,8 +18,9 @@ from alt_memory.repair_utils import (
     confirm_destructive_action,
     rebuild_fts5,
     run_vacuum,
-    sqlite_drawer_count,
+    sqlite_entity_count,
     sqlite_integrity_errors,
+    _verify_entity_count,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,12 @@ def _get_data_dir(dim_path: str) -> str:
 
 
 def _open_meta_db(data_dir: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(str(Path(data_dir) / "metadata.db"), check_same_thread=False)
+    db_path = Path(data_dir) / "metadata.db"
+    if not db_path.exists():
+        raise FileNotFoundError(
+            f"metadata.db not found at {db_path} — dimension not initialized or data directory missing"
+        )
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
@@ -63,9 +69,10 @@ class TruncationDetected(Exception):
 
 
 def status(dim_path: Optional[str] = None) -> dict:
-    """Health check: compare SQLite vs FAISS counts, run integrity checks.
+    """Health check: compare SQLite vs vector store counts, run integrity checks.
 
-    Returns a dict with ``ok``, ``entities_sqlite``, ``vectors_faiss``,
+    Supports both faiss and chroma backends. Returns a dict with ``ok``,
+    ``entities_sqlite``, ``vectors`` (vector store count), ``backend``,
     ``integrity_errors``, and a human-readable ``message``.
     """
     dim_path = _get_dim_path(dim_path)
@@ -78,7 +85,8 @@ def status(dim_path: Optional[str] = None) -> dict:
         "path": str(base),
         "ok": False,
         "entities_sqlite": 0,
-        "vectors_faiss": 0,
+        "vectors": 0,
+        "backend": "unknown",
         "integrity_errors": [],
         "message": "",
     }
@@ -88,27 +96,52 @@ def status(dim_path: Optional[str] = None) -> dict:
         result["integrity_errors"] = integrity
         result["message"] = f"SQLite integrity errors: {integrity[0][:80]}"
         return result
-    result["entities_sqlite"] = sqlite_drawer_count(str(sqlite_db)) or 0
+    result["entities_sqlite"] = sqlite_entity_count(str(sqlite_db), table="entities") or 0
 
-    index_path = data_dir / "index.faiss"
-    if not index_path.exists():
-        result["message"] = "FAISS index not found — dimension not initialized"
-        return result
+    config_path = base / "dimension.json"
+    backend = "faiss"
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                cfg = json.load(f)
+            backend = cfg.get("backend", "faiss")
+        except Exception:
+            pass
+    result["backend"] = backend
 
+    store = None
     try:
-        from alt_memory.backends.faiss_store import FaissStore
+        if backend == "chroma":
+            chroma_sqlite = data_dir / "chroma.sqlite3"
+            if not chroma_sqlite.exists():
+                result["message"] = "ChromaDB data not found — dimension not initialized"
+                return result
+            from alt_memory.backends.chroma_store import ChromaStore
+            store = ChromaStore(str(data_dir))
+        else:
+            index_path = data_dir / "index.faiss"
+            if not index_path.exists():
+                result["message"] = f"{backend.upper()} index not found — dimension not initialized"
+                return result
+            from alt_memory.backends.faiss_store import FaissStore
+            store = FaissStore(str(data_dir))
 
-        store = FaissStore(str(data_dir))
-        result["vectors_faiss"] = store.count()
+        result["vectors"] = store.count()
         store.close()
+        store = None
     except Exception as e:
-        result["message"] = f"FAISS error: {e}"
+        if store:
+            try:
+                store.close()
+            except Exception:
+                pass
+        result["message"] = f"{backend.upper()} error: {e}"
         return result
 
-    if result["entities_sqlite"] != result["vectors_faiss"]:
+    if result["entities_sqlite"] != result["vectors"]:
         result["message"] = (
             f"Mismatch: SQLite {result['entities_sqlite']} entities "
-            f"vs FAISS {result['vectors_faiss']} vectors"
+            f"vs {backend.upper()} {result['vectors']} vectors"
         )
     else:
         result["ok"] = True
@@ -120,7 +153,10 @@ def status(dim_path: Optional[str] = None) -> dict:
 
 
 def scan_dimension(dim_path: Optional[str] = None) -> tuple[set[str], set[str]]:
-    """Cross-reference SQLite entities vs FAISS pos_map.
+    """Cross-reference SQLite entities vs vector store.
+
+    Probes the vector store in batches with per-ID fallback on failure —
+    a single corrupt entry can't cascade and hide other IDs in the same batch.
 
     Returns ``(good_ids, bad_ids)`` where ``bad_ids`` are IDs present in
     one store but not the other. Writes ``corrupt_ids.txt`` to the dimension
@@ -144,22 +180,74 @@ def scan_dimension(dim_path: Optional[str] = None) -> tuple[set[str], set[str]]:
         print("  Nothing to scan.")
         return set(), set()
 
-    meta_path = Path(data_dir) / "metadata.db"
-    if not meta_path.exists():
-        print("  metadata.db not found — repair needs re-init")
-        return set(), sqlite_ids
+    config_path = base / "dimension.json"
+    backend = "faiss"
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                cfg = json.load(f)
+            backend = cfg.get("backend", "faiss")
+        except Exception:
+            pass
 
-    faiss_ids: set[str] = set()
-    meta = _open_meta_db(data_dir)
-    try:
-        for row in meta.execute("SELECT doc_id FROM pos_map"):
-            faiss_ids.add(row[0])
-    finally:
-        meta.close()
-    print(f"  FAISS vectors: {len(faiss_ids):,}")
+    vector_ids: set[str] = set()
+    print(f"\n  Probing {backend.upper()} store (batches of 100)...")
+    t0 = time.time()
 
-    good = sqlite_ids & faiss_ids
-    bad = (sqlite_ids - faiss_ids) | (faiss_ids - sqlite_ids)
+    if backend == "chroma":
+        from alt_memory.backends.chroma_store import ChromaStore
+        store = ChromaStore(str(data_dir))
+        try:
+            all_sorted = sorted(sqlite_ids)
+            batch = 100
+            for i in range(0, len(all_sorted), batch):
+                chunk = all_sorted[i : i + batch]
+                try:
+                    ids, _, _ = store.get(ids=chunk)
+                    for got in ids:
+                        vector_ids.add(got)
+                except Exception:
+                    for sid in chunk:
+                        try:
+                            ids, _, _ = store.get(ids=[sid])
+                            if ids:
+                                vector_ids.add(sid)
+                        except Exception:
+                            pass
+        finally:
+            store.close()
+    else:
+        meta = _open_meta_db(data_dir)
+        try:
+            all_sorted = sorted(sqlite_ids)
+            batch = 100
+            for i in range(0, len(all_sorted), batch):
+                chunk = all_sorted[i : i + batch]
+                ph = ",".join("?" * len(chunk))
+                try:
+                    for row in meta.execute(
+                        f"SELECT id FROM docs WHERE id IN ({ph})", chunk
+                    ):
+                        vector_ids.add(row[0])
+                except Exception:
+                    for sid in chunk:
+                        try:
+                            row = meta.execute(
+                                "SELECT id FROM docs WHERE id = ?", (sid,)
+                            ).fetchone()
+                            if row:
+                                vector_ids.add(sid)
+                        except Exception:
+                            pass
+        finally:
+            meta.close()
+
+    elapsed = time.time() - t0
+    print(f"  Probed in {elapsed:.1f}s")
+    print(f"  {backend.upper()} vectors found: {len(vector_ids):,}")
+
+    good = sqlite_ids & vector_ids
+    bad = (sqlite_ids - vector_ids) | (vector_ids - sqlite_ids)
 
     print(f"\n  Scan complete.")
     print(f"  GOOD: {len(good):,}")
@@ -202,9 +290,23 @@ def prune_corrupt(dim_path: Optional[str] = None, confirm: bool = False) -> None
         return
 
     db = _open_dimension_db(str(base))
-    from alt_memory.backends.faiss_store import FaissStore
 
-    store = FaissStore(data_dir)
+    config_path = base / "dimension.json"
+    backend = "faiss"
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                cfg = json.load(f)
+            backend = cfg.get("backend", "faiss")
+        except Exception:
+            pass
+
+    if backend == "chroma":
+        from alt_memory.backends.chroma_store import ChromaStore
+        store = ChromaStore(data_dir)
+    else:
+        from alt_memory.backends.faiss_store import FaissStore
+        store = FaissStore(data_dir)
     try:
         before = store.count()
         print(f"  Collection size before: {before:,}")
@@ -213,10 +315,10 @@ def prune_corrupt(dim_path: Optional[str] = None, confirm: bool = False) -> None
         for i in range(0, len(bad_ids), batch):
             chunk = bad_ids[i : i + batch]
             ph = ",".join("?" * len(chunk))
+            store.delete(ids=chunk)
             db.execute(f"DELETE FROM entities WHERE id IN ({ph})", chunk)
             db.execute(f"DELETE FROM entities_fts WHERE id IN ({ph})", chunk)
             db.commit()
-            store.delete(ids=chunk)
 
         after = store.count()
         print(f"\n  Deleted: {len(bad_ids):,}")
@@ -236,7 +338,7 @@ def check_extraction_safety(dim_path: str, extracted: int) -> None:
 
     Raises :class:`TruncationDetected` when extracted < SQLite count.
     """
-    sqlite_count = sqlite_drawer_count(
+    sqlite_count = sqlite_entity_count(
         str(Path(dim_path).expanduser().resolve() / "dimension.db")
     )
     if sqlite_count is None:
@@ -288,7 +390,7 @@ def rebuild_index(
 
         if rebuild_fts:
             print("  Rebuilding FTS5 index...")
-            rebuild_fts5(str(dim_db))
+            rebuild_fts5(str(dim_db), fts_table="entities_fts")
 
         if vacuum:
             print("  Running VACUUM...")
@@ -320,10 +422,10 @@ def rebuild_from_sqlite(
     data_dir = _get_data_dir(dim_path)
     dim_db = base / "dimension.db"
 
-    from alt_memory.backends.embedder import NumpyEmbedder
+    from alt_memory.backends.embedder import get_embedder
     from alt_memory.backends.faiss_store import FaissStore
 
-    embedder = NumpyEmbedder()
+    embedder = get_embedder()
 
     print(f"\n  Full rebuild from SQLite: {base}")
 
@@ -367,7 +469,7 @@ def rebuild_from_sqlite(
 
         if rebuild_fts:
             print("  Rebuilding FTS5 index...")
-            rebuild_fts5(str(dim_db))
+            rebuild_fts5(str(dim_db), fts_table="entities_fts")
 
         return after
     finally:

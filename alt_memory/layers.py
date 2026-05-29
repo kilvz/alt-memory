@@ -77,10 +77,10 @@ class MemoryStack:
         for e in entries:
             meta = e.get("metadata", {})
             result.append({
-                "id": e["id"],
-                "content": e["content"],
+                "id": e.get("id", ""),
+                "content": e.get("content", ""),
                 "metadata": meta,
-                "created_at": e["created_at"],
+                "created_at": e.get("created_at", ""),
                 "topic": meta.get("topic", "general"),
             })
         return result
@@ -89,7 +89,7 @@ class MemoryStack:
         """Compress higher layers into lower layers:
         - Summarize L3 (archive) entries into a new L1 (essential) entry
         - Summarize L1 entries into L0 (identity) update
-        - Uses naive text summarization: concatenate + truncate + extract key points
+        - Uses naive text summarization: concatenate + truncate
 
         Returns dict with keys: {l0_updated, l1_count, l3_count}
         """
@@ -105,9 +105,11 @@ class MemoryStack:
         l3_summary = ""
         if l3_entries:
             snippets = [
-                e["content"][:200] for e in l3_entries if e["content"].strip()
+                e.get("content", "")[:200] for e in l3_entries if e.get("content", "").strip()
             ]
             l3_summary = "; ".join(snippets)
+            if len(l3_summary) > 100000:
+                l3_summary = l3_summary[:100000] + "..."
 
         l1_count = 0
         if l3_summary:
@@ -123,11 +125,14 @@ class MemoryStack:
                 },
             )
             l1_count = 1
+            l1_entries = self._dimension.list_entities(
+                realm=realm, domain="layer_1_essential", limit=1000,
+            )
 
         l0_updated = False
         if l1_entries:
             key_facts = "; ".join(
-                e["content"][:300] for e in l1_entries if e["content"].strip()
+                e.get("content", "")[:300] for e in l1_entries if e.get("content", "").strip()
             )
             if key_facts:
                 self._dimension.add_entity(
@@ -167,8 +172,14 @@ class MemoryStack:
         self._validate_layer(layer)
         realm = self._realm_for(agent_name)
         domain = self.LAYER_NAMES[layer]
-        self._dimension.delete_domain(realm, domain)
-        self._dimension.get_or_create_domain(realm, domain)
+        for _ in range(100):
+            entities = self._dimension.list_entities(realm=realm, domain=domain, limit=1000)
+            if not entities:
+                return True
+            for e in entities:
+                eid = e.get("id")
+                if eid:
+                    self._dimension.delete_entity(eid)
         return True
 
     def get_latest_identity(self, agent_name: str) -> Optional[dict]:

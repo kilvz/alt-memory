@@ -24,7 +24,7 @@ import os
 import sqlite3
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 
 from alt_memory.config import AltMemoryConfig, normalize_realm_name
@@ -94,12 +94,14 @@ def build_graph(dimension=None, config=None):
     if not dimension:
         return {}, []
 
-    conn = sqlite3.connect(str(dimension._base / "dimension.db"))
-    conn.row_factory = sqlite3.Row
+    conn = None
     try:
+        conn = sqlite3.connect(str(dimension._base / "dimension.db"))
+        conn.row_factory = sqlite3.Row
         rows = conn.execute("SELECT id, realm, domain, metadata FROM entities").fetchall()
     finally:
-        conn.close()
+        if conn:
+            conn.close()
 
     domain_data = defaultdict(lambda: {"realms": set(), "halls": set(), "count": 0, "dates": set()})
 
@@ -141,7 +143,7 @@ def build_graph(dimension=None, config=None):
             "dates": sorted(data["dates"])[-5:] if data["dates"] else [],
         }
 
-    if nodes:
+    if nodes or edges:
         with _graph_cache_lock:
             _graph_cache_nodes = nodes
             _graph_cache_edges = edges
@@ -175,9 +177,9 @@ def traverse(start_domain: str, dimension=None, config=None, max_hops: int = 2):
         "hop": 0,
     }]
 
-    frontier = [(start_domain, 0)]
+    frontier = deque([(start_domain, 0)])
     while frontier:
-        current_domain, depth = frontier.pop(0)
+        current_domain, depth = frontier.popleft()
         if depth >= max_hops:
             continue
 
@@ -386,11 +388,10 @@ def _check_domain_exists(realm: str, domain: str, dimension) -> bool:
     if dimension is None:
         return True
     try:
-        conn = sqlite3.connect(str(dimension._base / "dimension.db"))
-        row = conn.execute(
-            "SELECT COUNT(*) FROM entities WHERE realm=? AND domain=?", (realm, domain)
-        ).fetchone()
-        conn.close()
+        with sqlite3.connect(str(dimension._base / "dimension.db")) as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM entities WHERE realm=? AND domain=?", (realm, domain)
+            ).fetchone()
         return row[0] > 0
     except Exception:
         logger.warning(
@@ -452,6 +453,9 @@ def create_tunnel(
         time so legacy underscore data and explicit-flag hyphen data both
         match queries in either form. See #1504.
     """
+    # NOTE: must NOT be called while already holding mine_lock —
+    # this function acquires it internally (line 484), and
+    # mine_lock is a file lock, not re-entrant.
     source_realm = _require_name(source_realm, "source_realm")
     source_domain = _require_name(source_domain, "source_domain")
     target_realm = _require_name(target_realm, "target_realm")
@@ -615,6 +619,9 @@ def compute_topic_tunnels(
       - realms whose topic list is empty are skipped.
       - ``min_count <= 0`` is clamped to 1.
     """
+    # NOTE: must NOT be called while already holding mine_lock —
+    # this function acquires it internally (line 643), and
+    # mine_lock is a file lock, not re-entrant.
     if not topics_by_realm:
         return []
 
@@ -639,26 +646,41 @@ def compute_topic_tunnels(
 
     realms = sorted(realm_topics.keys())
     created: list[dict] = []
-    for i, ra in enumerate(realms):
-        topics_a = realm_topics[ra]
-        for rb in realms[i + 1:]:
-            topics_b = realm_topics[rb]
-            shared_keys = set(topics_a.keys()) & set(topics_b.keys())
-            if len(shared_keys) < min_count:
-                continue
-            for key in sorted(shared_keys):
-                topic_name = topics_a[key] if topics_a[key] else topics_b[key]
-                domain = topic_domain(topic_name)
-                tunnel = create_tunnel(
-                    source_realm=ra,
-                    source_domain=domain,
-                    target_realm=rb,
-                    target_domain=domain,
-                    label=f"{label_prefix}: {topic_name}",
-                    kind="topic",
-                    dimension=dimension,
-                )
-                created.append(tunnel)
+    with mine_lock(_tunnel_file(dimension=dimension)):
+        tunnels = _load_tunnels(dimension=dimension)
+        for i, ra in enumerate(realms):
+            topics_a = realm_topics[ra]
+            for rb in realms[i + 1:]:
+                topics_b = realm_topics[rb]
+                shared_keys = set(topics_a.keys()) & set(topics_b.keys())
+                if len(shared_keys) < min_count:
+                    continue
+                for key in sorted(shared_keys):
+                    topic_name = topics_a[key] if topics_a[key] else topics_b[key]
+                    domain = topic_domain(topic_name)
+                    tunnel_id = _canonical_tunnel_id(ra, domain, rb, domain)
+                    tunnel = {
+                        "id": tunnel_id,
+                        "source": {"realm": ra, "domain": domain},
+                        "target": {"realm": rb, "domain": domain},
+                        "label": f"{label_prefix}: {topic_name}",
+                        "kind": "topic",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    found = False
+                    for existing in tunnels:
+                        if existing.get("id") == tunnel_id:
+                            tunnel["created_at"] = existing.get("created_at", tunnel["created_at"])
+                            tunnel["updated_at"] = datetime.now(timezone.utc).isoformat()
+                            existing.clear()
+                            existing.update(tunnel)
+                            created.append(existing)
+                            found = True
+                            break
+                    if not found:
+                        tunnels.append(tunnel)
+                        created.append(tunnel)
+        _save_tunnels(tunnels, dimension=dimension)
     return created
 
 

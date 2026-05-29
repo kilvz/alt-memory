@@ -49,12 +49,12 @@ def _ancestor_matchers(source_file: Path, root: Path, matcher_cache: dict) -> li
     cursor = root
     matcher = _load_gi_matcher(cursor, matcher_cache)
     if matcher is not None:
-        matchers.append(matcher)
+        matchers.append((root, matcher))
     for part in parts[:-1]:
         cursor = cursor / part
         matcher = _load_gi_matcher(cursor, matcher_cache)
         if matcher is not None:
-            matchers.append(matcher)
+            matchers.append((cursor, matcher))
     return matchers
 
 
@@ -81,8 +81,11 @@ def _load_gi_matcher(directory: Path, cache: dict):
 
 
 def is_gitignored(path: Path, matchers: list, is_dir: bool = False) -> bool:
-    rel = str(path)
-    for matcher in matchers:
+    for root, matcher in matchers:
+        try:
+            rel = str(path.relative_to(root))
+        except ValueError:
+            continue
         if matcher.match_file(rel):
             return True
     return False
@@ -121,27 +124,45 @@ def _classify_entity(
     return "kept"
 
 
-def _iter_entity_metadata(dimension, realm: Optional[str]):
-    conn = sqlite3.connect(str(dimension._base / "dimension.db"))
-    conn.row_factory = sqlite3.Row
+def _iter_entity_metadata(dimension, realm: Optional[str], conn=None):
+    if conn is None:
+        conn = sqlite3.connect(str(dimension._base / "dimension.db"))
+        conn.row_factory = sqlite3.Row
+        should_close = True
+    else:
+        should_close = False
     try:
-        sql = "SELECT id, realm, domain, content, metadata, source_file, created_at FROM entities"
+        base_sql = "SELECT id, realm, domain, content, metadata, source_file, created_at FROM entities"
         params = []
         if realm:
-            sql += " WHERE realm = ?"
+            base_sql += " WHERE realm = ?"
             params.append(realm)
-        sql += " ORDER BY created_at DESC"
-        rows = conn.execute(sql, params).fetchall()
-        for r in rows:
-            meta = json.loads(r["metadata"] or "{}")
-            yield r["id"], meta
+        base_sql += " ORDER BY created_at DESC"
+        offset = 0
+        while True:
+            sql = base_sql + " LIMIT ? OFFSET ?"
+            page_params = params + [_BATCH, offset]
+            rows = conn.execute(sql, page_params).fetchall()
+            if not rows:
+                return
+            for r in rows:
+                meta = json.loads(r["metadata"] or "{}")
+                yield r["id"], meta
+            if len(rows) < _BATCH:
+                return
+            offset += len(rows)
     finally:
-        conn.close()
+        if should_close:
+            conn.close()
 
 
-def _auto_detect_project_roots(dimension, realm: Optional[str]) -> list:
-    conn = sqlite3.connect(str(dimension._base / "dimension.db"))
-    conn.row_factory = sqlite3.Row
+def _auto_detect_project_roots(dimension, realm: Optional[str], conn=None) -> list:
+    if conn is None:
+        conn = sqlite3.connect(str(dimension._base / "dimension.db"))
+        conn.row_factory = sqlite3.Row
+        should_close = True
+    else:
+        should_close = False
     try:
         sql = "SELECT source_file FROM entities"
         params = []
@@ -150,7 +171,8 @@ def _auto_detect_project_roots(dimension, realm: Optional[str]) -> list:
             params.append(realm)
         rows = conn.execute(sql, params).fetchall()
     finally:
-        conn.close()
+        if should_close:
+            conn.close()
     roots: set = set()
     seen_sources: set = set()
     for r in rows:
@@ -171,6 +193,35 @@ def _auto_detect_project_roots(dimension, realm: Optional[str]) -> list:
 def _normalize_project_dirs(project_dirs) -> list:
     resolved = [Path(p).resolve(strict=False) for p in project_dirs]
     return sorted(resolved, key=lambda p: (-len(str(p)), str(p)))
+
+
+def _delete_in_batches(dimension, ids: list, batch_size: int = 999, wal_log: Optional[Callable] = None):
+    import datetime as dt
+    wal_dir = Path.home() / ".alt-memory" / "wal"
+    wal_dir.mkdir(parents=True, exist_ok=True)
+    wal_path = wal_dir / "sync_log.jsonl"
+    deleted = 0
+    for i in range(0, len(ids), batch_size):
+        chunk = ids[i:i + batch_size]
+        ph = ",".join("?" * len(chunk))
+        dimension._store.delete(ids=chunk)
+        dimension._db.execute(f"DELETE FROM entities WHERE id IN ({ph})", chunk)
+        dimension._db.execute(f"DELETE FROM entities_fts WHERE id IN ({ph})", chunk)
+        dimension._db.commit()
+        deleted += len(chunk)
+        if wal_log is not None:
+            entry = json.dumps({
+                "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "dimension": str(dimension._base),
+                "ids_deleted": chunk,
+                "count": len(chunk),
+            })
+            try:
+                with open(wal_path, "a") as f:
+                    f.write(entry + "\n")
+            except OSError:
+                pass
+    return deleted
 
 
 def sync_dimension(
@@ -203,59 +254,62 @@ def sync_dimension(
 
     dimension = Dimension(dimension_path)
     dimension.init()
+    try:
+        with dimension._lock:
+            conn = dimension._db
 
-    if project_dirs is not None:
-        roots = _normalize_project_dirs(project_dirs)
-    else:
-        roots = _auto_detect_project_roots(dimension, realm)
+            if project_dirs is not None:
+                roots = _normalize_project_dirs(project_dirs)
+            else:
+                roots = _auto_detect_project_roots(dimension, realm, conn=conn)
 
-    matcher_cache: dict = {}
-    classification_cache: dict = {}
+            matcher_cache: dict = {}
+            classification_cache: dict = {}
 
-    for entity_id, meta in _iter_entity_metadata(dimension, realm):
-        counts["scanned"] += 1
-        meta = meta or {}
-        source_file = meta.get("source_file")
+            for entity_id, meta in _iter_entity_metadata(dimension, realm, conn=conn):
+                counts["scanned"] += 1
+                meta = meta or {}
+                source_file = meta.get("source_file")
 
-        if _is_registry_row(meta, entity_id):
-            bucket = "kept"
-        elif source_file and source_file in classification_cache:
-            bucket = classification_cache[source_file]
-        else:
-            bucket = _classify_entity(meta, matcher_cache, roots, entity_id)
-            if source_file:
-                classification_cache[source_file] = bucket
+                if _is_registry_row(meta, entity_id):
+                    bucket = "kept"
+                elif source_file and source_file in classification_cache:
+                    bucket = classification_cache[source_file]
+                else:
+                    bucket = _classify_entity(meta, matcher_cache, roots, entity_id)
+                    if source_file:
+                        classification_cache[source_file] = bucket
 
-        counts[bucket] += 1
-        if bucket in ("gitignored", "missing"):
-            removable_ids.append(entity_id)
-            if source_file:
-                removable_sources.add(source_file)
-                by_source[source_file] += 1
+                counts[bucket] += 1
+                if bucket in ("gitignored", "missing"):
+                    removable_ids.append(entity_id)
+                    if source_file:
+                        removable_sources.add(source_file)
+                        by_source[source_file] += 1
 
-    report: SyncReport = {
-        **counts,
-        "removed_entities": 0,
-        "removed_closets": 0,
-        "dry_run": dry_run,
-        "by_source": dict(by_source),
-    }
+            report: SyncReport = {
+                **counts,
+                "removed_entities": 0,
+                "removed_closets": 0,
+                "dry_run": dry_run,
+                "by_source": dict(by_source),
+            }
 
-    if dry_run or not removable_ids:
+            if dry_run or not removable_ids:
+                return report
+
+            report["removed_entities"] = _delete_in_batches(dimension, removable_ids, wal_log=wal_log)
+
+            closet_rows = 0
+            if removable_sources:
+                closets_col = get_closets_collection(str(dimension._base))
+                for src in removable_sources:
+                    closet_rows += purge_file_closets(closets_col, src)
+            report["removed_closets"] = closet_rows
+
         return report
-
-    for eid in removable_ids:
-        dimension.delete_entity(eid)
-    report["removed_entities"] = len(removable_ids)
-
-    # Purge orphaned closets whose source_file was removed
-    if removable_sources:
-        closets_col = get_closets_collection(dimension._base)
-        for src in removable_sources:
-            purge_file_closets(closets_col, src)
-    report["removed_closets"] = len(removable_sources)
-
-    return report
+    finally:
+        dimension.close()
 
 
 __all__ = [

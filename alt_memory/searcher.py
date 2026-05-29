@@ -79,7 +79,10 @@ def _hybrid_rank(
     scored = []
     for r, raw, norm in zip(results, bm25_raw, bm25_norm):
         distance = r.get("distance")
-        vec_sim = max(0.0, 1.0 - distance) if distance is not None else 0.0
+        if distance is None:
+            vec_sim = 0.0
+        else:
+            vec_sim = max(0.0, 1.0 - distance)
         r["bm25_score"] = round(raw, 3)
         scored.append((vector_weight * vec_sim + bm25_weight * norm, r))
 
@@ -116,6 +119,10 @@ def _merge_bm25_union_candidates(
     BM25-only additions carry ``distance=None`` so ``_hybrid_rank`` scores
     them on BM25 contribution alone.
 
+    Dedup is chunk-precise: uses ``(_source_file_full, _chunk_index)`` when
+    available so two files sharing a basename don't collide, and a vector hit
+    on chunk N doesn't block BM25 from contributing chunk M of the same file.
+
     When ``max_distance > 0.0``, BM25-only candidates are skipped —
     they have no vector distance to satisfy the threshold.
     """
@@ -135,7 +142,17 @@ def _merge_bm25_union_candidates(
 
 
 def _dedup_key(entry: dict) -> str:
-    src = entry.get("source_file") or entry.get("metadata", {}).get("source_file")
+    """Compute a dedup key preferring (source_file_full, chunk_index) over basename.
+
+    Chunk-precise: two files sharing a basename in different directories
+    get different keys. When full-path metadata is absent, falls back to
+    the ``source_file`` basename.
+    """
+    full = entry.get("_source_file_full") or entry.get("metadata", {}).get("source_file")
+    ci = entry.get("_chunk_index") or entry.get("metadata", {}).get("chunk_index")
+    if full and ci is not None:
+        return f"{full}::{ci}"
+    src = full or entry.get("source_file") or entry.get("metadata", {}).get("source_file")
     return src or "?"
 
 

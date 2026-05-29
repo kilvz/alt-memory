@@ -21,8 +21,12 @@ def main():
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="Initialize dimension")
+    p_init = sub.add_parser("init", help="Multi-pass initialization with entity/room detection")
+    p_init.add_argument("dir", nargs="?", default=None, help="Project directory to initialize")
     p_init.add_argument("--version", type=int, default=2)
+    p_init.add_argument("--lang", default=None, help="Comma-separated language codes (e.g. en,pt-br)")
+    p_init.add_argument("--llm-provider", default=None, help="LLM provider (ollama, openai-compat, anthropic)")
+    p_init.add_argument("--llm-model", default=None, help="LLM model name")
 
     sub.add_parser("status", help="Show dimension status")
 
@@ -49,21 +53,14 @@ def main():
     p_list.add_argument("--limit", "-l", type=int, default=20)
     p_list.add_argument("--offset", "-o", type=int, default=0)
 
-    p_wing = sub.add_parser("wings", help="List realms")
-    p_wing.add_argument("--verbose", "-v", action="store_true")
+    p_realm = sub.add_parser("realms", help="List realms")
+    p_realm.add_argument("--verbose", "-v", action="store_true")
 
     p_room = sub.add_parser("rooms", help="List domains")
     p_room.add_argument("--realm", "-w")
 
     p_del = sub.add_parser("delete", help="Delete an entity")
     p_del.add_argument("entity_id")
-
-    p_wing_del = sub.add_parser("delete-realm", help="Delete a realm")
-    p_wing_del.add_argument("name")
-
-    p_room_del = sub.add_parser("delete-domain", help="Delete a domain")
-    p_room_del.add_argument("--realm", "-w", required=True)
-    p_room_del.add_argument("--domain", "-r", required=True)
 
     p_kga = sub.add_parser("kg-add", help="Add KG fact")
     p_kga.add_argument("--subject", "-s", required=True)
@@ -108,10 +105,14 @@ def main():
     p_aaak.add_argument("--output-format", choices=["aaak", "json"],
                         default="aaak")
 
-    p_mine = sub.add_parser("mine", help="Mine a file into the dimension")
-    p_mine.add_argument("file")
-    p_mine.add_argument("--realm", "-w", required=True)
-    p_mine.add_argument("--domain", "-r", required=True)
+    p_mine = sub.add_parser("mine", help="Mine files into the dimension")
+    p_mine.add_argument("file", help="File or directory to mine")
+    p_mine.add_argument("--mode", choices=["projects", "convos", "extract"], default="projects",
+                        help="Ingest mode: projects (default), convos, or extract")
+    p_mine.add_argument("--realm", "-w", help="Realm/wing name")
+    p_mine.add_argument("--domain", "-r", help="Domain name (projects mode)")
+    p_mine.add_argument("--agent", default="alt-memory", help="Agent name (default: alt-memory)")
+    p_mine.add_argument("--dry-run", action="store_true", help="Preview without filing")
 
     p_mcp = sub.add_parser("mcp", help="Run MCP server")
     p_mcp.add_argument("--host", default="127.0.0.1")
@@ -156,12 +157,16 @@ def main():
                            help="Show schema version and migration status")
 
     p_repair = sub.add_parser("repair", help="Repair utilities: integrity, VACUUM, FTS5 rebuild")
+    p_repair.add_argument("--mode", choices=["status", "scan", "prune", "rebuild"], default=None,
+                          help="Repair sub-mode")
     p_repair.add_argument("--integrity", action="store_true", help="Check SQLite integrity")
     p_repair.add_argument("--vacuum", action="store_true", help="Run VACUUM")
     p_repair.add_argument("--rebuild-fts", action="store_true", help="Rebuild FTS5 index")
     p_repair.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
 
     p_repair_status = sub.add_parser("repair-status", help="Dimension health check")
+
+    p_rebuild_sqlite = sub.add_parser("rebuild-from-sqlite", help="Rebuild FAISS from SQLite ground truth")
 
     p_wake = sub.add_parser("wake-up", help="Show L0+L1 wake-up context")
     p_wake.add_argument("--agent", required=True, help="Agent name")
@@ -177,7 +182,47 @@ def main():
 
     try:
         if args.command == "init":
-            print(f"Dimension initialized at {Path(args.dimension).expanduser().resolve()}")
+            dim_path = Path(args.dimension).expanduser().resolve()
+
+            if args.dir:
+                project_dir = str(Path(args.dir).expanduser().resolve())
+
+                try:
+                    from alt_memory.corpus_origin import detect_origin_heuristic
+                    samples = []
+                    proj = Path(project_dir)
+                    if proj.is_dir():
+                        from alt_memory.entity_detector import scan_for_detection
+                        files = scan_for_detection(project_dir, max_files=30)
+                        for fp in files:
+                            try:
+                                samples.append(fp.read_text("utf-8", "replace")[:100000])
+                            except OSError:
+                                continue
+                    if samples:
+                        origin = detect_origin_heuristic(samples)
+                        if origin.likely_ai_dialogue:
+                            platform = origin.primary_platform or "AI dialogue"
+                            print(f"  Corpus origin: {platform}")
+                except Exception:
+                    pass
+
+                try:
+                    from alt_memory.project_scanner import discover_entities
+                    detected = discover_entities(Path(project_dir))
+                    total = (len(detected.get("people", [])) + len(detected.get("projects", [])))
+                    if total > 0:
+                        print(f"  Entities found: {total}")
+                except Exception:
+                    pass
+
+                try:
+                    from alt_memory.room_detector_local import detect_rooms_local
+                    detect_rooms_local(project_dir=project_dir, yes=True)
+                except Exception:
+                    pass
+
+            print(f"Dimension initialized at {dim_path}")
 
         elif args.command == "status":
             s = dim.status()
@@ -190,6 +235,7 @@ def main():
 
         elif args.command == "search":
             if not args.query:
+                print("Enter search query:", file=sys.stderr)
                 args.query = sys.stdin.read().strip()
             results = dim.search(args.query, n_results=args.limit,
                                      realm=args.realm, domain=args.domain, mode=args.mode)
@@ -220,14 +266,14 @@ def main():
                     print(f"  {d['content']}")
                     print()
 
-        elif args.command == "wings":
-            wings = dim.list_realms()
-            if not wings:
+        elif args.command == "realms":
+            realms = dim.list_realms()
+            if not realms:
                 print("No realms.")
             else:
-                for w in wings:
-                    desc = f" - {w['description']}" if w['description'] and args.verbose else ""
-                    print(f"  {w['name']:20s}  {w['entity_count']} entities{desc}")
+                for r in realms:
+                    desc = f" - {r['description']}" if r['description'] and args.verbose else ""
+                    print(f"  {r['name']:20s}  {r['entity_count']} entities{desc}")
 
         elif args.command == "rooms":
             rooms = dim.list_domains(args.realm)
@@ -240,14 +286,6 @@ def main():
         elif args.command == "delete":
             ok = dim.delete_entity(args.entity_id)
             print("Deleted." if ok else "Not found.")
-
-        elif args.command == "delete-wing":
-            dim.delete_realm(args.name)
-            print(f"Realm {args.name} deleted.")
-
-        elif args.command == "delete-room":
-            dim.delete_domain(args.realm, args.domain)
-            print(f"Domain {args.realm}/{args.domain} deleted.")
 
         elif args.command == "kg-add":
             fid = dim.kg.add(args.subject, args.predicate, args.object,
@@ -313,9 +351,28 @@ def main():
                 print(compressed)
 
         elif args.command == "mine":
-            from alt_memory.miner import mine_file_into_dimension
-            count = mine_file_into_dimension(dim, args.file, args.realm, args.domain)
-            print(f"Mined {count} items from {args.file}")
+            if args.mode == "convos":
+                from alt_memory.convo_miner import mine_convos
+                mine_convos(
+                    convo_dir=args.file,
+                    dim_path=args.dimension,
+                    realm=args.realm,
+                    agent=args.agent,
+                    dry_run=args.dry_run,
+                )
+            elif args.mode == "extract":
+                from alt_memory.format_miner import mine_formats
+                mine_formats(
+                    format_dir=args.file,
+                    dim_path=args.dimension,
+                    realm=args.realm,
+                    agent=args.agent,
+                    dry_run=args.dry_run,
+                )
+            else:
+                from alt_memory.miner import mine_file_into_dimension
+                count = mine_file_into_dimension(dim, args.file, args.realm, args.domain)
+                print(f"Mined {count} items from {args.file}")
 
         # ── Ported upstream command handlers ─────────────────────────
 
@@ -393,8 +450,11 @@ def main():
                 print(f"Domains:    {s.get('domains', '?')}")
                 print(f"Vectors:  {s.get('vectors', '?')}")
             elif args.rebuild_faiss:
-                result = rebuild_faiss(base)
-                print(f"FAISS rebuild: {result['vectors_rebuilt']} vectors")
+                if args.dry_run:
+                    print("DRY RUN: would rebuild FAISS index")
+                else:
+                    result = rebuild_faiss(base)
+                    print(f"FAISS rebuild: {result['vectors_rebuilt']} vectors")
             else:
                 result = migrate(base, dry_run=args.dry_run)
                 if args.dry_run:
@@ -409,36 +469,53 @@ def main():
                 confirm_destructive_action, rebuild_fts5, run_vacuum,
                 sqlite_integrity_errors,
             )
-            db_path = str(Path(args.dimension).expanduser() / "data" / "metadata.db")
-            if args.integrity:
-                errors = sqlite_integrity_errors(db_path)
-                if errors:
-                    print(f"Integrity errors ({len(errors)}):")
-                    for e in errors[:10]:
-                        print(f"  - {e}")
-                else:
-                    print("Integrity check passed.")
-            if args.vacuum:
-                if confirm_destructive_action("VACUUM", db_path, assume_yes=args.yes):
-                    run_vacuum(db_path)
-                    print("VACUUM complete.")
-            if args.rebuild_fts:
-                if confirm_destructive_action("FTS5 rebuild", db_path, assume_yes=args.yes):
-                    rebuild_fts5(db_path)
-                    print("FTS5 index rebuilt.")
-            if not any([args.integrity, args.vacuum, args.rebuild_fts]):
-                errors = sqlite_integrity_errors(db_path)
-                if errors:
-                    print(f"Repair needed: {len(errors)} integrity issues")
-                    for e in errors[:5]:
-                        print(f"  - {e}")
-                else:
-                    print("No repair needed — dimension is healthy.")
+            db_path = str(Path(args.dimension).expanduser() / "dimension.db")
+
+            if args.mode == "status":
+                from alt_memory.repair import status as repair_status
+                s = repair_status(args.dimension)
+                print(json.dumps(s, indent=2))
+            elif args.mode == "scan":
+                from alt_memory.repair import scan_dimension
+                good, bad = scan_dimension(args.dimension)
+                print(f"Scan complete: {len(good)} good IDs, {len(bad)} bad IDs")
+            elif args.mode == "prune":
+                from alt_memory.repair import prune_corrupt
+                prune_corrupt(args.dimension, confirm=args.yes)
+            elif args.mode == "rebuild":
+                from alt_memory.repair import rebuild_index
+                n = rebuild_index(args.dimension)
+                print(f"Rebuilt {n} vectors")
+            else:
+                if args.integrity:
+                    errors = sqlite_integrity_errors(db_path)
+                    if errors:
+                        print(f"Integrity errors ({len(errors)}):")
+                        for e in errors[:10]:
+                            print(f"  - {e}")
+                    else:
+                        print("Integrity check passed.")
+                if args.vacuum:
+                    if confirm_destructive_action("VACUUM", db_path, assume_yes=args.yes):
+                        run_vacuum(db_path)
+                        print("VACUUM complete.")
+                if args.rebuild_fts:
+                    if confirm_destructive_action("FTS5 rebuild", db_path, assume_yes=args.yes):
+                        rebuild_fts5(db_path, fts_table="entities_fts")
+                        print("FTS5 index rebuilt.")
+                if not any([args.integrity, args.vacuum, args.rebuild_fts]):
+                    errors = sqlite_integrity_errors(db_path)
+                    if errors:
+                        print(f"Repair needed: {len(errors)} integrity issues")
+                        for e in errors[:5]:
+                            print(f"  - {e}")
+                    else:
+                        print("No repair needed — dimension is healthy.")
 
         elif args.command == "repair-status":
-            from alt_memory.repair_utils import sqlite_drawer_count, sqlite_integrity_errors
-            db_path = str(Path(args.dimension).expanduser() / "data" / "metadata.db")
-            count = sqlite_drawer_count(db_path)
+            from alt_memory.repair_utils import sqlite_entity_count, sqlite_integrity_errors
+            db_path = str(Path(args.dimension).expanduser() / "dimension.db")
+            count = sqlite_entity_count(db_path)
             errors = sqlite_integrity_errors(db_path)
             print(f"Dimension: {args.dimension}")
             print(f"Entities: {count or 0}")
@@ -446,6 +523,11 @@ def main():
             if errors:
                 for e in errors[:5]:
                     print(f"  - {e}")
+
+        elif args.command == "rebuild-from-sqlite":
+            from alt_memory.repair import rebuild_from_sqlite
+            n = rebuild_from_sqlite(args.dimension)
+            print(f"Rebuilt {n} vectors from SQLite")
 
         elif args.command == "wake-up":
             from alt_memory.layers import MemoryStack

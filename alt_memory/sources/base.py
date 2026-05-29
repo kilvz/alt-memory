@@ -27,7 +27,7 @@ class AdapterClosedError(SourceAdapterError):
 
 
 class TransformationViolationError(SourceAdapterError):
-    """Raised by the conformance suite when round-tripping a drawer requires
+    """Raised by the conformance suite when round-tripping an entity requires
     an undeclared transformation (RFC 002 §7.2–7.3)."""
 
 
@@ -105,7 +105,7 @@ class BaseSourceAdapter(ABC):
     default_privacy_class: ClassVar[str] = "pii_potential"
 
     @abstractmethod
-    def ingest(self, *, source: SourceRef, palace: PalaceContext) -> Iterator[IngestResult]:
+    def ingest(self, *, source: SourceRef, ctx: PalaceContext) -> Iterator[IngestResult]:
         ...
 
     @abstractmethod

@@ -1,12 +1,11 @@
 """Lightweight embedding: TF-IDF + TruncatedSVD -> 384-dim vectors."""
 
-import hashlib
 import json
 import logging
-import os
 import pickle
 import re
 import string
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -28,6 +27,7 @@ class NumpyEmbedder:
 
     def __init__(self, model_dir: Optional[str] = None):
         self.model_dir = model_dir
+        self._lock = threading.Lock()
         self._vocab: dict[str, int] = {}
         self._idf: Optional[np.ndarray] = None
         self._svd_components: Optional[np.ndarray] = None
@@ -43,8 +43,7 @@ class NumpyEmbedder:
         """Embed texts. Returns float32 array shape (n, 384)."""
         if not texts:
             return np.zeros((0, _EMBED_DIM), dtype=np.float32)
-        if not self._fitted:
-            self._fit(texts)
+        self._fit(texts)
         tfidf = self._transform(texts)
         if self._svd_components is None or self._svd_mean is None:
             return np.zeros((len(texts), _EMBED_DIM), dtype=np.float32)
@@ -60,7 +59,7 @@ class NumpyEmbedder:
         return self._fitted
 
     def save(self, directory: str) -> None:
-        path = Path(self.model_dir)
+        path = Path(directory)
         path.mkdir(parents=True, exist_ok=True)
         data = {
             "vocab": self._vocab,
@@ -70,9 +69,11 @@ class NumpyEmbedder:
             "doc_count": self._doc_count,
             "df": self._df,
         }
-        with open(path / "embedder.json", "w") as f:
+        tmp = path / "embedder.json.tmp"
+        with open(tmp, "w") as f:
             json.dump(data, f)
-        logger.info("Embedder saved to %s (%d terms)", self.model_dir, len(self._vocab))
+        tmp.replace(path / "embedder.json")
+        logger.info("Embedder saved to %s (%d terms)", directory, len(self._vocab))
 
     def _load(self) -> None:
         path = Path(self.model_dir) / "embedder.json"
@@ -91,75 +92,78 @@ class NumpyEmbedder:
             logger.info("Embedder loaded from %s (%d terms, %d docs seen)", self.model_dir, len(self._vocab), self._doc_count)
 
     def _fit(self, texts: list[str]) -> None:
-        tokenized = []
-        for t in texts:
-            tokens = self._tokenize(t)
-            tokenized.append(tokens)
-            unique = set(tokens)
-            for tok in unique:
-                self._df[tok] = self._df.get(tok, 0) + 1
-        self._doc_count += len(texts)
+        with self._lock:
+            if self._fitted:
+                return
+            tokenized = []
+            for t in texts:
+                tokens = self._tokenize(t)
+                tokenized.append(tokens)
+                unique = set(tokens)
+                for tok in unique:
+                    self._df[tok] = self._df.get(tok, 0) + 1
+            self._doc_count += len(texts)
 
-        n_docs = self._doc_count
-        filtered = {}
-        for term, df in self._df.items():
-            freq = df / n_docs
-            if df >= _MIN_DF and freq <= _MAX_DF:
-                filtered[term] = len(filtered)
-        if len(filtered) > _MAX_VOCAB:
-            sorted_terms = sorted(filtered.items(), key=lambda x: -self._df.get(x[0], 0))
-            filtered = {t: i for i, (t, _) in enumerate(sorted_terms[:_MAX_VOCAB])}
+            n_docs = self._doc_count
+            filtered = {}
+            for term, df in self._df.items():
+                freq = df / n_docs
+                if df >= _MIN_DF and freq <= _MAX_DF:
+                    filtered[term] = len(filtered)
+            if len(filtered) > _MAX_VOCAB:
+                sorted_terms = sorted(filtered.items(), key=lambda x: -self._df.get(x[0], 0))
+                filtered = {t: i for i, (t, _) in enumerate(sorted_terms[:_MAX_VOCAB])}
 
-        self._vocab = filtered
-        vocab_size = len(self._vocab)
+            self._vocab = filtered
+            vocab_size = len(self._vocab)
 
-        if vocab_size == 0:
-            logger.warning("Empty vocabulary")
+            if vocab_size == 0:
+                logger.warning("Empty vocabulary")
+                self._fitted = True
+                return
+
+            idf = np.zeros(vocab_size, dtype=np.float64)
+            for term, idx in self._vocab.items():
+                df = self._df.get(term, 0)
+                idf[idx] = np.log((n_docs + 1) / (df + 1)) + 1.0
+            self._idf = idf
+
+            rows, cols, vals = [], [], []
+            for i, tokens in enumerate(tokenized):
+                tf = {}
+                for tok in tokens:
+                    if tok in self._vocab:
+                        tf[tok] = tf.get(tok, 0) + 1
+                n_tokens = len(tokens) if tokens else 1
+                for term, count in tf.items():
+                    rows.append(i)
+                    cols.append(self._vocab[term])
+                    vals.append((count / n_tokens) * idf[self._vocab[term]])
+            tfidf = csr_array((vals, (rows, cols)), shape=(len(texts), vocab_size), dtype=np.float64)
+
+            k = min(_EMBED_DIM, tfidf.shape[0] - 1, tfidf.shape[1] - 1)
+            if k < 1:
+                logger.warning("Not enough data for SVD (k=%d)", k)
+                self._fitted = True
+                return
+
+            u, s, vt = svds(tfidf, k=k)
+            idx = np.argsort(-s)
+            s = s[idx]
+            vt = vt[idx]
+            components = np.zeros((_EMBED_DIM, vocab_size), dtype=np.float64)
+            k_use = min(k, _EMBED_DIM)
+            components[:k_use] = vt[:k_use]
+            self._svd_components = components
+
+            self._svd_mean = tfidf.mean(axis=0)
+            if hasattr(self._svd_mean, "A1"):
+                self._svd_mean = np.asarray(self._svd_mean).flatten()
+            else:
+                self._svd_mean = self._svd_mean.flatten()
+
             self._fitted = True
-            return
-
-        idf = np.zeros(vocab_size, dtype=np.float64)
-        for term, idx in self._vocab.items():
-            df = self._df.get(term, 0)
-            idf[idx] = np.log((n_docs + 1) / (df + 1)) + 1.0
-        self._idf = idf
-
-        rows, cols, vals = [], [], []
-        for i, tokens in enumerate(tokenized):
-            tf = {}
-            for tok in tokens:
-                if tok in self._vocab:
-                    tf[tok] = tf.get(tok, 0) + 1
-            n_tokens = len(tokens) if tokens else 1
-            for term, count in tf.items():
-                rows.append(i)
-                cols.append(self._vocab[term])
-                vals.append((count / n_tokens) * idf[self._vocab[term]])
-        tfidf = csr_array((vals, (rows, cols)), shape=(len(texts), vocab_size), dtype=np.float64)
-
-        k = min(_EMBED_DIM, tfidf.shape[0] - 1, tfidf.shape[1] - 1)
-        if k < 1:
-            logger.warning("Not enough data for SVD (k=%d)", k)
-            self._fitted = True
-            return
-
-        u, s, vt = svds(tfidf, k=k)
-        idx = np.argsort(-s)
-        s = s[idx]
-        vt = vt[idx]
-        components = np.zeros((_EMBED_DIM, vocab_size), dtype=np.float64)
-        k_use = min(k, _EMBED_DIM)
-        components[:k_use] = vt[:k_use]
-        self._svd_components = components
-
-        self._svd_mean = tfidf.mean(axis=0)
-        if hasattr(self._svd_mean, "A1"):
-            self._svd_mean = np.asarray(self._svd_mean).flatten()
-        else:
-            self._svd_mean = self._svd_mean.flatten()
-
-        self._fitted = True
-        logger.info("Embedder fitted: %d terms, %d docs, SVD k=%d -> %d dims", vocab_size, n_docs, k_use, _EMBED_DIM)
+            logger.info("Embedder fitted: %d terms, %d docs, SVD k=%d -> %d dims", vocab_size, n_docs, k_use, _EMBED_DIM)
 
     def _transform(self, texts: list[str]) -> csr_array:
         if not self._vocab or self._idf is None:
@@ -188,7 +192,9 @@ class NumpyEmbedder:
 
 _global_embedder: Optional[NumpyEmbedder] = None
 _onnx_warned: set = set()
+_onnx_lock: threading.Lock = threading.Lock()
 _embedder_cache: dict = {}
+_embedder_lock: threading.Lock = threading.Lock()
 
 
 def _resolve_bert_embedder():
@@ -228,14 +234,16 @@ def get_embedder(
     """
     if model == "numpy":
         global _global_embedder
-        if _global_embedder is None:
-            _global_embedder = NumpyEmbedder(model_dir=model_dir)
-        return _global_embedder
+        with _embedder_lock:
+            if _global_embedder is None:
+                _global_embedder = NumpyEmbedder(model_dir=model_dir)
+            return _global_embedder
 
     key = f"{model}:{model_dir or ''}:{device or ''}"
-    cached = _embedder_cache.get(key)
-    if cached is not None:
-        return cached
+    with _embedder_lock:
+        cached = _embedder_cache.get(key)
+        if cached is not None:
+            return cached
 
     if model == "sentence":
         ef = SentenceTransformerEmbedder()
@@ -254,7 +262,11 @@ def get_embedder(
     else:
         raise ValueError(f"Unknown embedder model: {model!r}")
 
-    _embedder_cache[key] = ef
+    with _embedder_lock:
+        cached = _embedder_cache.get(key)
+        if cached is not None:
+            return cached
+        _embedder_cache[key] = ef
     return ef
 
 
@@ -276,6 +288,7 @@ class SentenceTransformerEmbedder:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         self._model_name = model_name
         self._model = None
+        self._load_lock = threading.Lock()
 
     @property
     def dimension(self) -> int:
@@ -294,18 +307,21 @@ class SentenceTransformerEmbedder:
     def _lazy_load(self) -> None:
         if self._model is not None:
             return
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as e:
-            raise ImportError(
-                "SentenceTransformerEmbedder requires sentence-transformers. "
-                "Install with: pip install sentence-transformers"
-            ) from e
-        self._model = SentenceTransformer(self._model_name)
-        logger.info(
-            "SentenceTransformerEmbedder loaded: model=%s dim=%d",
-            self._model_name, _EMBED_DIM,
-        )
+        with self._load_lock:
+            if self._model is not None:
+                return
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError as e:
+                raise ImportError(
+                    "SentenceTransformerEmbedder requires sentence-transformers. "
+                    "Install with: pip install sentence-transformers"
+                ) from e
+            self._model = SentenceTransformer(self._model_name)
+            logger.info(
+                "SentenceTransformerEmbedder loaded: model=%s dim=%d",
+                self._model_name, _EMBED_DIM,
+            )
 
 
 # ── spaCy + GloVe embedder (no ONNX, no PyTorch) ────────────────────────
@@ -332,6 +348,7 @@ class SpacyGloveEmbedder:
     def __init__(self, model_name: str = "en_core_web_md"):
         self._model_name = model_name
         self._nlp = None
+        self._load_lock = threading.Lock()
 
     @property
     def dimension(self) -> int:
@@ -356,18 +373,21 @@ class SpacyGloveEmbedder:
     def _lazy_load(self) -> None:
         if self._nlp is not None:
             return
-        try:
-            import spacy
-        except ImportError as e:
-            raise ImportError(
-                "SpacyGloveEmbedder requires spacy. "
-                "Install with: pip install spacy && python -m spacy download en_core_web_md"
-            ) from e
-        self._nlp = spacy.load(self._model_name)
-        logger.info(
-            "SpacyGloveEmbedder loaded: model=%s dim=%d (zero-padded to %d)",
-            self._model_name, self._GLOVE_DIM, _EMBED_DIM,
-        )
+        with self._load_lock:
+            if self._nlp is not None:
+                return
+            try:
+                import spacy
+            except ImportError as e:
+                raise ImportError(
+                    "SpacyGloveEmbedder requires spacy. "
+                    "Install with: pip install spacy && python -m spacy download en_core_web_md"
+                ) from e
+            self._nlp = spacy.load(self._model_name)
+            logger.info(
+                "SpacyGloveEmbedder loaded: model=%s dim=%d (zero-padded to %d)",
+                self._model_name, self._GLOVE_DIM, _EMBED_DIM,
+            )
 
 
 # ── Hardware acceleration support ────────────────────────────────────────
@@ -417,20 +437,22 @@ def resolve_embedding_device(device: Optional[str] = None) -> tuple[list[str], s
 
     entry = _ACCELERATOR_MAP.get(device)
     if entry is None:
-        if device not in _onnx_warned:
-            logger.warning("Unknown embedding_device %r — falling back to cpu", device)
-            _onnx_warned.add(device)
+        with _onnx_lock:
+            if device not in _onnx_warned:
+                logger.warning("Unknown embedding_device %r — falling back to cpu", device)
+                _onnx_warned.add(device)
         return (["CPUExecutionProvider"], "cpu")
 
     preferred, extra = entry
     if preferred not in available:
-        if device not in _onnx_warned:
-            logger.warning(
-                "embedding_device=%r requested but %s not available — "
-                "falling back to CPU. Install onnxruntime with %s.",
-                device, preferred, extra,
-            )
-            _onnx_warned.add(device)
+        with _onnx_lock:
+            if device not in _onnx_warned:
+                logger.warning(
+                    "embedding_device=%r requested but %s not available — "
+                    "falling back to CPU. Install onnxruntime with %s.",
+                    device, preferred, extra,
+                )
+                _onnx_warned.add(device)
         return (["CPUExecutionProvider"], "cpu")
 
     return ([preferred, "CPUExecutionProvider"], device)
@@ -492,9 +514,8 @@ class OnnxEmbedder:
     def embed(self, texts: list[str]) -> "np.ndarray":
         """Embed texts. Returns float32 array shape (n, 384)."""
         if not texts:
-            return __import__("numpy").zeros((0, _EMBED_DIM), dtype=np.float32)
+            return np.zeros((0, _EMBED_DIM), dtype=np.float32)
         self._lazy_load()
-        np = __import__("numpy")
         encs = self._tokenizer(
             texts,
             padding=True,
@@ -522,7 +543,6 @@ class OnnxEmbedder:
         if self._session is not None:
             return
         try:
-            import numpy as np
             import onnxruntime as ort
             from transformers import AutoTokenizer
         except ImportError as e:
@@ -568,7 +588,7 @@ class OnnxEmbedder:
         except Exception:
             model_path = hf_hub_download(
                 model_id.replace("sentence-transformers/", "")
-                .replace("-", "-") + "-ONNX",
+                + "-ONNX",
                 filename="model.onnx",
             )
         return ort.InferenceSession(model_path, providers=self._providers)
@@ -614,7 +634,7 @@ class EmbeddinggemmaONNX:
     def embed(self, texts: list[str]) -> "np.ndarray":
         """Embed texts. Returns float32 array shape (n, 384)."""
         if not texts:
-            return __import__("numpy").zeros((0, _EMBEDDINGGEMMA_DIM), dtype=np.float32)
+            return np.zeros((0, _EMBEDDINGGEMMA_DIM), dtype=np.float32)
         self._lazy_load()
         np = self._np
         prefixed = [_EMBEDDINGGEMMA_PREFIX + t for t in texts]

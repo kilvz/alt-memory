@@ -4,7 +4,7 @@ Asks the user:
   1. How they're using Alt Memory (work / personal / combo)
   2. Who the people in their life are (names, nicknames, relationships)
   3. What their projects are
-  4. What they want their wings called
+  4. What they want their realms called
 
 Seeds the entity registry with confirmed data so Alt Memory knows your world
 from minute one — before a single session is indexed.
@@ -15,7 +15,7 @@ from pathlib import Path
 from alt_memory.entity_detector import EntityDetector
 from alt_memory.backends.knowledge_graph import KnowledgeGraph
 
-DEFAULT_WINGS = {
+DEFAULT_REALMS = {
     "work": ["projects", "clients", "team", "decisions", "research"],
     "personal": ["family", "health", "creative", "reflections", "relationships"],
     "combo": ["family", "work", "health", "creative", "projects", "reflections"],
@@ -160,15 +160,15 @@ def _ask_projects(mode: str) -> list:
     return projects
 
 
-def _ask_wings(mode: str) -> list:
-    defaults = DEFAULT_WINGS[mode]
+def _ask_realms(mode: str) -> list:
+    defaults = DEFAULT_REALMS[mode]
     _hr()
     print(f"""
   Realms are the top-level categories in your memory dimension.
-  Suggested wings for {mode} mode: {', '.join(defaults)}
+  Suggested realms for {mode} mode: {', '.join(defaults)}
   Press enter to keep these, or type your own comma-separated list.
 """)
-    custom = input("  Wings: ").strip()
+    custom = input("  Realms: ").strip()
     if custom:
         return [w.strip() for w in custom.split(",") if w.strip()]
     return defaults
@@ -177,7 +177,6 @@ def _ask_wings(mode: str) -> list:
 def _scan_for_detection(directory: str) -> list:
     """Walk directory and return list of text file contents for entity detection."""
     import os
-    from pathlib import Path
     texts = []
     skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
     text_exts = {".txt", ".md", ".rst", ".py", ".js", ".ts", ".json", ".yaml", ".yml"}
@@ -230,7 +229,7 @@ def _warn_ambiguous(people: list) -> list:
     return ambiguous
 
 
-def _seed_kg(kg: KnowledgeGraph, people: list, projects: list, aliases: dict):
+def _seed_kg(kg: KnowledgeGraph, people: list, projects: list, aliases: dict, realms: list = None):
     for p in people:
         name = p["name"]
         kg.add_entity(name=name, entity_type="person")
@@ -245,6 +244,9 @@ def _seed_kg(kg: KnowledgeGraph, people: list, projects: list, aliases: dict):
     for proj in projects:
         kg.add_entity(name=proj, entity_type="project")
 
+    for realm in (realms or []):
+        kg.add_entity(name=realm, entity_type="realm")
+
 
 def run_onboarding(
     kg_path: str = None,
@@ -254,13 +256,14 @@ def run_onboarding(
     from alt_memory.config import AltMemoryConfig
 
     config = AltMemoryConfig()
-    kg = KnowledgeGraph(path=kg_path or config.kg_path)
+    kg_dir = kg_path or config.dim_path
+    kg = KnowledgeGraph(path=kg_dir)
     detector = EntityDetector()
 
     mode = _ask_mode()
     people, aliases = _ask_people(mode)
     projects = _ask_projects(mode)
-    wings = _ask_wings(mode)
+    realms = _ask_realms(mode)
 
     if auto_detect and _yn("\nScan your files for additional names we might have missed?"):
         directory = _ask("Directory to scan", default=directory)
@@ -276,12 +279,13 @@ def run_onboarding(
                     ans = input(f"    {e.get('name', '')} — (p)erson, (s)kip? ").strip().lower()
                     if ans == "p":
                         rel = input(f"    Relationship/role for {e.get('name', '')}? ").strip()
-                        ctx = (
-                            "personal" if mode == "personal"
-                            else "work" if mode == "work"
-                            else input("    Context — (p)ersonal or (w)ork? ").strip().lower()
-                            .replace("w", "work").replace("p", "personal")
-                        )
+                        if mode == "personal":
+                            ctx = "personal"
+                        elif mode == "work":
+                            ctx = "work"
+                        else:
+                            raw = input("    Context — (p)ersonal or (w)ork? ").strip().lower()
+                            ctx = "personal" if raw in ("p", "personal") else "work"
                         people.append({"name": e["name"], "relationship": rel, "context": ctx})
 
     ambiguous = _warn_ambiguous(people)
@@ -293,15 +297,15 @@ def run_onboarding(
   Alt Memory will check the context before treating them as person names.
 """)
 
-    _seed_kg(kg, people, projects, aliases)
+    _seed_kg(kg, people, projects, aliases, realms)
 
     _header("Setup Complete")
     print()
     print(f"  Mode: {mode}")
     print(f"  People: {len(people)}")
     print(f"  Projects: {len(projects)}")
-    print(f"  Realms: {', '.join(wings)}")
-    print(f"  KG path: {kg_path or config.kg_path}")
+    print(f"  Realms: {', '.join(realms)}")
+    print(f"  KG path: {kg_path or config.dim_path}")
     print()
 
 
@@ -314,5 +318,6 @@ def quick_setup(
 ) -> None:
     from alt_memory.config import AltMemoryConfig
     config = AltMemoryConfig()
-    kg = KnowledgeGraph(path=kg_path or config.kg_path)
+    kg_dir = kg_path or config.dim_path
+    kg = KnowledgeGraph(path=kg_dir)
     _seed_kg(kg, people, projects or [], aliases or {})

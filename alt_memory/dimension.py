@@ -8,7 +8,7 @@ import re
 import sqlite3
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -17,10 +17,10 @@ import numpy as np
 from alt_memory.backends.embedder import get_embedder
 from alt_memory.backends.faiss_store import FaissStore
 from alt_memory.backends.knowledge_graph import KnowledgeGraph
+from alt_memory.config import _SAFE_NAME_RE
+from alt_memory.searcher import _hybrid_rank
 
 logger = logging.getLogger(__name__)
-
-_SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,62}[a-z0-9]$|^[a-z0-9]$")
 
 # Closet infrastructure constants
 NORMALIZE_VERSION = 2
@@ -45,6 +45,8 @@ _ENTITY_STOPLIST = frozenset(
         "July", "August", "September", "October", "November", "December",
     }
 )
+
+_STORE_BACKUP_FILES = ["index.faiss", "metadata.db", "seq.txt", "chroma.sqlite3"]
 
 
 class MineAlreadyRunning(RuntimeError):
@@ -73,7 +75,13 @@ def mine_lock(source_file: str):
     lock_path = os.path.join(
         lock_dir, hashlib.sha256(source_file.encode()).hexdigest()[:16] + ".lock"
     )
-    lf = open(lock_path, "w")
+    if not os.path.exists(lock_path):
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            pass
+    lf = open(lock_path, "r+b")
     try:
         if os.name == "nt":
             import msvcrt
@@ -98,9 +106,7 @@ def mine_lock(source_file: str):
 # ── Per-dimension mine lock (non-blocking, re-entrant) ─────────────────────
 
 
-import threading as _threading
-
-_dim_lock_holders = _threading.local()
+_dim_lock_holders = threading.local()
 
 
 def _holder_state():
@@ -271,7 +277,7 @@ def prefetch_mined_set(dim_path: str) -> set[str]:
 
 def _sanitize(name: str, kind: str = "name") -> str:
     name = name.strip().lower().replace(" ", "_").replace("-", "_")
-    if not _SAFE_NAME.match(name):
+    if not _SAFE_NAME_RE.match(name):
         raise ValueError(f"Invalid {kind}: {name!r}")
     return name
 
@@ -289,10 +295,11 @@ class SearchResult:
 class Dimension:
     """Main dimension - realms, domains, entities, search."""
 
-    def __init__(self, path: str = "~/.alt-memory"):
+    def __init__(self, path: str = "~/.alt-memory", backend: str = "faiss"):
         self._base = Path(path).expanduser().resolve()
         self._data_dir = self._base / "data"
-        self._lock = threading.Lock()
+        self._backend = backend
+        self._lock = threading.RLock()
         self._initialized = False
 
         self._db: Optional[sqlite3.Connection] = None
@@ -303,15 +310,78 @@ class Dimension:
         # Hybrid search state (FTS5)
         self._fts_enabled = False
 
+    def _db_execute(self, sql, params=None):
+        with self._lock:
+            if params is not None:
+                return self._db.execute(sql, params)
+            return self._db.execute(sql)
+
+    def _db_commit(self):
+        with self._lock:
+            self._db.commit()
+
+    def _create_store(self, dimension: int = 384):
+        if self._backend == "chroma":
+            from alt_memory.backends.chroma_store import ChromaStore
+            return ChromaStore(str(self._data_dir), dimension=dimension)
+        from alt_memory.backends.faiss_store import FaissStore
+        return FaissStore(str(self._data_dir), dimension=dimension)
+
+    def set_backend(self, backend: str, reindex: bool = True) -> dict:
+        """Switch the vector store backend (faiss or chroma).
+
+        Persists to ``dimension.json``, closes the old store, and creates
+        a new one. When ``reindex=True``, all existing entities are
+        re-embedded into the new store.
+        """
+        valid = {"faiss", "chroma"}
+        if backend not in valid:
+            raise ValueError(f"Unknown backend: {backend!r}. Valid: {sorted(valid)}")
+
+        if backend == self._backend:
+            return {"backend": backend, "reindexed": 0, "note": "already active"}
+
+        old_backend = self._backend
+        self._backend = backend
+
+        config_path = self._base / "dimension.json"
+        config = {}
+        if config_path.exists():
+            with open(config_path) as f:
+                config = json.load(f)
+        config["backend"] = backend
+        with open(config_path, "w") as f:
+            json.dump(config, f)
+
+        info = {"backend": backend, "previous_backend": old_backend}
+
+        if reindex:
+            count = self._reindex_embeddings()
+            info["reindexed"] = count
+        else:
+            if self._store:
+                self._store.close()
+            self._store = self._create_store()
+            info["reindexed"] = 0
+
+        return info
+
     def init(self) -> bool:
         """Initialize or open the dimension. Returns True if newly created."""
         self._base.mkdir(parents=True, exist_ok=True)
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
-        is_new = not (self._base / "dimension.json").exists()
+        config_path = self._base / "dimension.json"
+        is_new = not config_path.exists()
+
+        if not is_new:
+            with open(config_path) as f:
+                config = json.load(f)
+            self._backend = config.get("backend", self._backend)
 
         self._db = sqlite3.connect(str(self._base / "dimension.db"), check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA foreign_keys=ON")
         self._db.execute("""CREATE TABLE IF NOT EXISTS realms (
                 name TEXT PRIMARY KEY, description TEXT DEFAULT '',
                 created_at TEXT DEFAULT (datetime('now')))""")
@@ -336,16 +406,17 @@ class Dimension:
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_closets_source ON closets(source_file)")
         self._db.commit()
 
-        self._store = FaissStore(str(self._data_dir))
+        self._store = self._create_store()
         self._embedder = self._load_embedder(is_new=is_new)
+        self._store.dimension = self._embedder.dimension
         self._kg = KnowledgeGraph(str(self._data_dir))
         self._fts_enabled = True
 
         if is_new:
             with open(self._base / "dimension.json", "w") as f:
                 json.dump({
-                    "version": 3, "created_at": datetime.utcnow().isoformat(),
-                    "backend": "faiss",
+                    "version": 3, "created_at": datetime.now(timezone.utc).isoformat(),
+                    "backend": self._backend,
                     "embedding": self._embedder_config_name(self._embedder),
                     "dimension": 384,
                 }, f)
@@ -355,14 +426,15 @@ class Dimension:
         return is_new
 
     def close(self) -> None:
-        self._save_embedder()
-        if self._store:
-            self._store.close()
-        if self._kg:
-            self._kg.close()
-        if self._db:
-            self._db.close()
-        self._initialized = False
+        with self._lock:
+            self._save_embedder()
+            if self._store:
+                self._store.close()
+            if self._kg:
+                self._kg.close()
+            if self._db:
+                self._db.close()
+            self._initialized = False
 
     def _save_embedder(self):
         if self._embedder and self._embedder.is_fitted:
@@ -418,6 +490,7 @@ class Dimension:
                 onnxruntime
             except ImportError:
                 logger.info("onnxruntime not available for bert — using numpy backend")
+                model = "numpy"
         elif model == "minilm" or model == "embeddinggemma":
             try:
                 import onnxruntime
@@ -425,7 +498,7 @@ class Dimension:
             except ImportError:
                 logger.warning("onnxruntime not installed for %s — falling back to numpy", model)
                 model = "numpy"
-        if model not in ("sentence", "bert") and config_path.exists():
+        if model == "numpy" and config_path.exists():
             with open(config_path) as f:
                 config = json.load(f)
             if config.get("embedding") != "numpy_tfidf_svd":
@@ -457,7 +530,7 @@ class Dimension:
     # -- Realm management --
 
     def list_realms(self) -> list[dict]:
-        rows = self._db.execute("""SELECT r.name, r.description, r.created_at,
+        rows = self._db_execute("""SELECT r.name, r.description, r.created_at,
                 COUNT(e.id) as entity_count FROM realms r
                 LEFT JOIN entities e ON e.realm = r.name
                 GROUP BY r.name ORDER BY r.name""").fetchall()
@@ -466,29 +539,36 @@ class Dimension:
 
     def get_or_create_realm(self, name: str, description: str = "") -> str:
         name = _sanitize(name, "realm")
-        self._db.execute("INSERT OR IGNORE INTO realms (name, description) VALUES (?, ?)",
-                         (name, description))
-        self._db.commit()
+        with self._lock:
+            self._db.execute("INSERT OR IGNORE INTO realms (name, description) VALUES (?, ?)",
+                             (name, description))
+            self._db.commit()
         return name
 
     def delete_realm(self, name: str) -> bool:
         name = _sanitize(name, "realm")
-        self._db.execute("DELETE FROM entities WHERE realm = ?", (name,))
-        self._db.execute("DELETE FROM domains WHERE realm = ?", (name,))
-        self._db.execute("DELETE FROM realms WHERE name = ?", (name,))
-        self._db.commit()
+        with self._lock:
+            ids = [r[0] for r in self._db.execute(
+                "SELECT id FROM entities WHERE realm = ?", (name,)).fetchall()]
+            if ids and self._store:
+                self._store.delete(ids=ids)
+            self._db.execute("DELETE FROM entities_fts WHERE id IN (SELECT id FROM entities WHERE realm = ?)", (name,))
+            self._db.execute("DELETE FROM entities WHERE realm = ?", (name,))
+            self._db.execute("DELETE FROM domains WHERE realm = ?", (name,))
+            self._db.execute("DELETE FROM realms WHERE name = ?", (name,))
+            self._db.commit()
         return True
 
     # -- Domain management --
 
     def list_domains(self, realm: Optional[str] = None) -> list[dict]:
         if realm:
-            rows = self._db.execute("""SELECT d.name, d.realm, d.description, d.created_at,
+            rows = self._db_execute("""SELECT d.name, d.realm, d.description, d.created_at,
                     COUNT(e.id) as entity_count FROM domains d
                     LEFT JOIN entities e ON e.domain = d.name AND e.realm = d.realm
                     WHERE d.realm = ? GROUP BY d.name, d.realm ORDER BY d.name""", (realm,))
         else:
-            rows = self._db.execute("""SELECT d.name, d.realm, d.description, d.created_at,
+            rows = self._db_execute("""SELECT d.name, d.realm, d.description, d.created_at,
                     COUNT(e.id) as entity_count FROM domains d
                     LEFT JOIN entities e ON e.domain = d.name AND e.realm = d.realm
                     GROUP BY d.name, d.realm ORDER BY d.realm, d.name""")
@@ -499,17 +579,24 @@ class Dimension:
         realm = _sanitize(realm, "realm")
         name = _sanitize(name, "domain")
         self.get_or_create_realm(realm)
-        self._db.execute("INSERT OR IGNORE INTO domains (name, realm, description) VALUES (?, ?, ?)",
-                         (name, realm, description))
-        self._db.commit()
+        with self._lock:
+            self._db.execute("INSERT OR IGNORE INTO domains (name, realm, description) VALUES (?, ?, ?)",
+                             (name, realm, description))
+            self._db.commit()
         return name
 
     def delete_domain(self, realm: str, name: str) -> bool:
         realm = _sanitize(realm, "realm")
         name = _sanitize(name, "domain")
-        self._db.execute("DELETE FROM entities WHERE realm = ? AND domain = ?", (realm, name))
-        self._db.execute("DELETE FROM domains WHERE realm = ? AND name = ?", (realm, name))
-        self._db.commit()
+        with self._lock:
+            ids = [r[0] for r in self._db.execute(
+                "SELECT id FROM entities WHERE realm = ? AND domain = ?", (realm, name)).fetchall()]
+            if ids and self._store:
+                self._store.delete(ids=ids)
+            self._db.execute("DELETE FROM entities_fts WHERE id IN (SELECT id FROM entities WHERE realm = ? AND domain = ?)", (realm, name))
+            self._db.execute("DELETE FROM entities WHERE realm = ? AND domain = ?", (realm, name))
+            self._db.execute("DELETE FROM domains WHERE realm = ? AND name = ?", (realm, name))
+            self._db.commit()
         return True
 
     # -- Entity operations --
@@ -528,24 +615,30 @@ class Dimension:
         meta = dict(metadata or {})
         meta["realm"] = realm
         meta["domain"] = domain
+        if source_file is not None:
+            meta["source_file"] = source_file
         embedding = self._embedder.embed([content])[0]
         embedding_2d = embedding.reshape(1, -1)
-        self._store.add(ids=[entity_id], texts=[content], metadatas=[meta],
-                        embeddings=embedding_2d)
-        self._db.execute(
-            "INSERT OR REPLACE INTO entities (id, realm, domain, content, metadata, source_file) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (entity_id, realm, domain, content, json.dumps(meta), source_file))
-        self._db.execute(
-            "INSERT OR REPLACE INTO entities_fts (id, content) VALUES (?, ?)",
-            (entity_id, content))
-        self._db.commit()
+        with self._lock:
+            self._store.add(ids=[entity_id], texts=[content], metadatas=[meta],
+                            embeddings=embedding_2d)
+            self._db.execute(
+                "INSERT OR REPLACE INTO entities (id, realm, domain, content, metadata, source_file) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (entity_id, realm, domain, content, json.dumps(meta), source_file))
+            self._db.execute(
+                "DELETE FROM entities_fts WHERE id = ?",
+                (entity_id,))
+            self._db.execute(
+                "INSERT INTO entities_fts (id, content) VALUES (?, ?)",
+                (entity_id, content))
+            self._db.commit()
         self._save_embedder()
         logger.debug("Added entity %s in %s/%s", entity_id, realm, domain)
         return entity_id
 
     def get_entity(self, entity_id: str) -> Optional[dict]:
-        row = self._db.execute(
+        row = self._db_execute(
             "SELECT id, realm, domain, content, metadata, source_file, created_at "
             "FROM entities WHERE id = ?", (entity_id,)).fetchone()
         if not row:
@@ -569,20 +662,22 @@ class Dimension:
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        rows = self._db.execute(sql, params).fetchall()
+        rows = self._db_execute(sql, params).fetchall()
         return [{"id": row[0], "realm": row[1], "domain": row[2],
-                 "content": row[3][:500] + ("..." if len(row[3]) > 500 else ""),
+                 "content": row[3],
                  "metadata": json.loads(row[4] or "{}"), "source_file": row[5],
                  "created_at": row[6]} for row in rows]
 
     def delete_entity(self, entity_id: str) -> bool:
-        row = self._db.execute("SELECT id FROM entities WHERE id = ?", (entity_id,)).fetchone()
-        if not row:
-            return False
-        self._db.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
-        self._db.execute("DELETE FROM entities_fts WHERE id = ?", (entity_id,))
-        self._db.commit()
-        self._store.delete(ids=[entity_id])
+        with self._lock:
+            row = self._db.execute("SELECT id FROM entities WHERE id = ?", (entity_id,)).fetchone()
+            if not row:
+                return False
+            if self._store:
+                self._store.delete(ids=[entity_id])
+            self._db.execute("DELETE FROM entities WHERE id = ?", (entity_id,))
+            self._db.execute("DELETE FROM entities_fts WHERE id = ?", (entity_id,))
+            self._db.commit()
         return True
 
     def update_entity(self, entity_id: str, content: Optional[str] = None,
@@ -600,20 +695,21 @@ class Dimension:
             new_meta["realm"] = _sanitize(realm, "realm")
         if domain:
             new_meta["domain"] = _sanitize(domain, "domain")
-        if content is not None:
+        with self._lock:
             embedding = self._embedder.embed([new_content])[0]
             embedding_2d = embedding.reshape(1, -1)
             self._store.upsert(ids=[entity_id], texts=[new_content],
-                               metadatas=[new_meta], embeddings=embedding_2d)
-            self._db.execute("DELETE FROM entities_fts WHERE id = ?", (entity_id,))
-            self._db.execute("INSERT OR REPLACE INTO entities_fts (id, content) VALUES (?, ?)",
-                             (entity_id, new_content))
-        new_realm = new_meta.get("realm", existing["realm"])
-        new_domain = new_meta.get("domain", existing["domain"])
-        self._db.execute(
-            "UPDATE entities SET content=?, metadata=?, realm=?, domain=? WHERE id=?",
-            (new_content, json.dumps(new_meta), new_realm, new_domain, entity_id))
-        self._db.commit()
+                                metadatas=[new_meta], embeddings=embedding_2d)
+            if content is not None:
+                self._db.execute("DELETE FROM entities_fts WHERE id = ?", (entity_id,))
+                self._db.execute("INSERT OR REPLACE INTO entities_fts (id, content) VALUES (?, ?)",
+                                  (entity_id, new_content))
+            new_realm = new_meta.get("realm", existing["realm"])
+            new_domain = new_meta.get("domain", existing["domain"])
+            self._db.execute(
+                "UPDATE entities SET content=?, metadata=?, realm=?, domain=? WHERE id=?",
+                (new_content, json.dumps(new_meta), new_realm, new_domain, entity_id))
+            self._db.commit()
         self._save_embedder()
         return True
 
@@ -624,7 +720,10 @@ class Dimension:
                mode: str = "hybrid") -> list[SearchResult]:
         """Search across all entities. mode: 'vector', 'keyword', or 'hybrid'."""
         if not self._store or self._store.count() == 0:
-            return []
+            if mode == "hybrid":
+                return self._keyword_search(query, n_results, realm, domain)
+            if mode != "keyword":
+                return []
 
         if mode == "keyword":
             return self._keyword_search(query, n_results, realm, domain)
@@ -632,6 +731,144 @@ class Dimension:
             return self._vector_search(query, n_results, realm, domain)
         else:
             return self._hybrid_search(query, n_results, realm, domain)
+
+    def search_memories(
+        self,
+        query: str,
+        n_results: int = 5,
+        realm: Optional[str] = None,
+        domain: Optional[str] = None,
+        max_distance: float = 0.0,
+        candidate_strategy: str = "vector",
+        vector_disabled: bool = False,
+    ) -> dict:
+        """Programmatic search — returns a dict instead of SearchResult list.
+
+        Used by the MCP server and other callers that need structured data.
+
+        Args:
+            query: Natural language search query.
+            n_results: Max results to return.
+            realm: Optional realm filter.
+            domain: Optional domain filter.
+            max_distance: Max cosine distance threshold. 0 = identical, 2 = opposite.
+                Results with distance > this are filtered out. 0.0 disables filtering.
+            candidate_strategy: ``"vector"`` (default) or ``"union"`` (vector + BM25).
+            vector_disabled: When True, route to keyword-only search.
+        """
+        from alt_memory.searcher import validate_candidate_strategy, apply_candidate_strategy
+
+        validate_candidate_strategy(candidate_strategy)
+
+        if vector_disabled:
+            kw = self._keyword_search(query, n_results, realm, domain)
+            return {
+                "query": query,
+                "filters": {"realm": realm, "domain": domain},
+                "results": [
+                    {
+                        "id": r.id,
+                        "text": r.text,
+                        "distance": None,
+                        "metadata": r.metadata,
+                        "realm": r.realm,
+                        "domain": r.domain,
+                    }
+                    for r in kw
+                ],
+                "fallback": "keyword_only",
+            }
+
+        if not self._store or self._store.count() == 0:
+            kw = self._keyword_search(query, n_results, realm, domain)
+            return {
+                "query": query,
+                "filters": {"realm": realm, "domain": domain},
+                "results": [
+                    {
+                        "id": r.id,
+                        "text": r.text,
+                        "distance": r.distance,
+                        "metadata": r.metadata,
+                        "realm": r.realm,
+                        "domain": r.domain,
+                    }
+                    for r in kw
+                ],
+            }
+
+        # Over-fetch for re-ranking
+        vec_results = self._vector_search(query, n_results * 3, realm, domain)
+        kw_results = self._keyword_search(query, n_results * 3, realm, domain)
+
+        # Apply max_distance threshold
+        if max_distance > 0.0:
+            vec_results = [r for r in vec_results if r.distance <= max_distance]
+
+        # Convert to dict hits
+        hits: list[dict] = []
+        for r in vec_results:
+            entry = {
+                "id": r.id,
+                "text": r.text,
+                "distance": r.distance,
+                "metadata": r.metadata,
+                "realm": r.realm,
+                "domain": r.domain,
+                "_source_file_full": r.metadata.get("source_file", ""),
+                "_chunk_index": r.metadata.get("chunk_index"),
+            }
+            hits.append(entry)
+
+        # Apply candidate strategy (union = merge BM25-only hits)
+        kw_dicts = [
+            {
+                "text": r.text,
+                "distance": r.distance,
+                "metadata": r.metadata,
+                "source_file": r.metadata.get("source_file", ""),
+                "_source_file_full": r.metadata.get("source_file", ""),
+                "_chunk_index": r.metadata.get("chunk_index"),
+            }
+            for r in kw_results
+        ]
+        apply_candidate_strategy(
+            candidate_strategy,
+            hits,
+            query,
+            kw_dicts,
+            n_results,
+            max_distance=max_distance,
+        )
+
+        # Closet boost
+        source_files = set()
+        for h in hits:
+            src = h.get("_source_file_full") or h.get("metadata", {}).get("source_file")
+            if src:
+                source_files.add(src)
+        boosted_ids = self._get_closet_source_ids(source_files) if source_files else set()
+
+        BOOST_VALUES = [0.40, 0.25, 0.15, 0.08, 0.04]
+        if boosted_ids:
+            for h in hits:
+                if h.get("id") in boosted_ids:
+                    h["closet_boost"] = BOOST_VALUES[0]
+
+        # BM25 hybrid re-rank
+        hits = _hybrid_rank(hits, query)[:n_results]
+
+        # Clean internal fields
+        for h in hits:
+            h.pop("_source_file_full", None)
+            h.pop("_chunk_index", None)
+            h.setdefault("closet_boost", 0.0)
+
+        return {
+            "query": query,
+            "filters": {"realm": realm, "domain": domain},
+            "results": hits,
+        }
 
     def _vector_search(self, query: str, n_results: int = 10,
                        realm: Optional[str] = None, domain: Optional[str] = None) -> list[SearchResult]:
@@ -672,8 +909,9 @@ class Dimension:
         sql += " ORDER BY rank LIMIT ?"
         params.append(n_results)
         try:
-            rows = self._db.execute(sql, params).fetchall()
-        except Exception:
+            rows = self._db_execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            logger.warning("FTS5 query failed, falling back to vector search", exc_info=True)
             return self._vector_search(query, n_results, realm, domain)
         results = []
         for r in rows:
@@ -704,8 +942,20 @@ class Dimension:
 
     def _hybrid_search(self, query: str, n_results: int = 10,
                         realm: Optional[str] = None, domain: Optional[str] = None) -> list[SearchResult]:
-        vec_results = self._vector_search(query, n_results * 3, realm, domain)
-        kw_results = self._keyword_search(query, n_results * 3, realm, domain)
+        vec_results = self._vector_search(query, n_results * 2, realm, domain)
+        kw_results = self._keyword_search(query, n_results * 2, realm, domain)
+
+        # Normalize keyword distances to [0, 1] to match cosine similarity scale
+        if kw_results:
+            kw_max = max(r.distance for r in kw_results)
+            if kw_max > 0:
+                kw_results = [
+                    SearchResult(
+                        id=r.id, text=r.text, distance=r.distance / kw_max,
+                        metadata=r.metadata, realm=r.realm, domain=r.domain,
+                    )
+                    for r in kw_results
+                ]
 
         seen = set()
         combined: list[SearchResult] = []
@@ -732,7 +982,7 @@ class Dimension:
                     if r.id in boosted_ids:
                         combined[i] = SearchResult(
                             id=r.id, text=r.text,
-                            distance=min(1.0, r.distance + 0.15),
+                            distance=r.distance + 0.15,
                             metadata=r.metadata, realm=r.realm, domain=r.domain,
                         )
 
@@ -741,27 +991,27 @@ class Dimension:
 
     def _get_closet_source_ids(self, source_files: set[str]) -> set[str]:
         """Return entity IDs whose source_file is referenced in closets."""
-        try:
-            placeholders = ",".join("?" * len(source_files))
-            rows = self._db.execute(
-                f"SELECT DISTINCT drawer_id FROM closets "
-                f"WHERE source_file IN ({placeholders})",
-                list(source_files),
-            ).fetchall()
-            return {r[0] for r in rows}
-        except Exception:
+        if not source_files:
             return set()
+        placeholders = ",".join("?" * len(source_files))
+        rows = self._db_execute(
+            f"SELECT DISTINCT e.id FROM entities e INNER JOIN closets c ON c.source_file = e.source_file "
+            f"WHERE c.source_file IN ({placeholders})",
+            list(source_files),
+        ).fetchall()
+        return {r[0] for r in rows}
 
     # -- FTS maintenance --
 
     def rebuild_fts(self) -> None:
         """Rebuild FTS index from all entity contents."""
-        self._db.execute("DELETE FROM entities_fts")
-        rows = self._db.execute("SELECT id, content FROM entities").fetchall()
-        for rid, content in rows:
-            self._db.execute("INSERT INTO entities_fts (id, content) VALUES (?, ?)",
-                             (rid, content))
-        self._db.commit()
+        with self._lock:
+            self._db.execute("DELETE FROM entities_fts")
+            rows = self._db.execute("SELECT id, content FROM entities").fetchall()
+            for rid, content in rows:
+                self._db.execute("INSERT INTO entities_fts (id, content) VALUES (?, ?)",
+                                 (rid, content))
+            self._db.commit()
         logger.info("Rebuilt FTS index with %d entities", len(rows))
 
     # -- Status --
@@ -770,12 +1020,54 @@ class Dimension:
         if not self._initialized:
             return {"initialized": False}
         realms = self.list_realms()
-        total_entities = self._db.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
-        total_domains = self._db.execute("SELECT COUNT(*) FROM domains").fetchone()[0]
+        total_entities = self._db_execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+        total_domains = self._db_execute("SELECT COUNT(*) FROM domains").fetchone()[0]
+        embedder_name = getattr(self._embedder, "name", "unknown") if self._embedder else "none"
         return {"initialized": True, "path": str(self._base), "realms": len(realms),
                 "domains": total_domains, "entities": total_entities,
-                "realms_detail": realms, "embedding": "numpy_tfidf_svd_384",
+                "realms_detail": realms, "embedding": embedder_name,
                 "fts_enabled": self._fts_enabled}
+
+    def diagnose(self) -> dict:
+        """Return state diagnosis: status, message, and suggested action."""
+        result = {"status": "unknown", "message": "", "action": ""}
+        if not self._base.exists():
+            result["status"] = "missing"
+            result["message"] = f"No dimension at {self._base}"
+            result["action"] = "Run dimension.init() to create"
+            return result
+        db_path = self._base / "dimension.db"
+        if not db_path.exists():
+            result["status"] = "not_initialized"
+            result["message"] = "Dimension directory exists but dimension.db not found"
+            result["action"] = "Run dimension.init() to initialize"
+            return result
+        try:
+            count = self._db_execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+        except Exception:
+            result["status"] = "unreadable"
+            result["message"] = "dimension.db exists but is unreadable"
+            result["action"] = "Check file permissions or run repair"
+            return result
+        if count == 0:
+            result["status"] = "empty"
+            result["message"] = "Dimension has no entities yet"
+            result["action"] = "Run mining to populate"
+            return result
+        vec_count = self._store.count() if self._store else 0
+        if vec_count == 0:
+            result["status"] = "store_empty"
+            result["message"] = f"SQLite has {count} entities but vector store is empty"
+            result["action"] = "Run rebuild_index or rebuild_from_sqlite"
+            return result
+        if count != vec_count:
+            result["status"] = "diverged"
+            result["message"] = f"SQLite has {count} entities but vector store has {vec_count}"
+            result["action"] = "Run scan_dimension to find corrupt IDs, then prune"
+            return result
+        result["status"] = "healthy"
+        result["message"] = f"Dimension healthy: {count} entities, {vec_count} vectors"
+        return result
 
     # -- Agent diary --
 
@@ -806,7 +1098,7 @@ class Dimension:
 
     def get_taxonomy(self) -> dict:
         """Full taxonomy tree: realm → domain → entity_count."""
-        rows = self._db.execute(
+        rows = self._db_execute(
             "SELECT realm, domain, COUNT(*) as cnt FROM entities GROUP BY realm, domain ORDER BY realm, domain"
         ).fetchall()
         tree = {}
@@ -818,26 +1110,25 @@ class Dimension:
 
     def reconnect(self) -> bool:
         """Re-initialize database, FAISS, and KG connections in-place."""
-        self._save_embedder()
-        if self._store:
-            self._store.close()
-        if self._kg:
-            self._kg.close()
-        if self._db:
-            self._db.close()
-        self._db = sqlite3.connect(str(self._base / "dimension.db"))
-        self._db.row_factory = sqlite3.Row
-        self._db.execute("PRAGMA journal_mode=WAL")
-        self._db.execute("PRAGMA foreign_keys=ON")
-        self._fts_enabled = bool(self._db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='entities_fts'"
-        ).fetchone())
-        from alt_memory.backends.faiss_store import FaissStore
-        from alt_memory.backends.knowledge_graph import KnowledgeGraph
-        self._store = FaissStore(str(self._data_dir))
-        self._embedder = self._load_embedder()
-        self._kg = KnowledgeGraph(str(self._data_dir))
-        self._initialized = True
+        with self._lock:
+            self._save_embedder()
+            if self._store:
+                self._store.close()
+            if self._kg:
+                self._kg.close()
+            if self._db:
+                self._db.close()
+            self._db = sqlite3.connect(str(self._base / "dimension.db"), check_same_thread=False)
+            self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA foreign_keys=ON")
+            self._fts_enabled = bool(self._db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='entities_fts'"
+            ).fetchone())
+            self._store = self._create_store()
+            self._embedder = self._load_embedder()
+            self._store.dimension = self._embedder.dimension
+            self._kg = KnowledgeGraph(str(self._data_dir))
+            self._initialized = True
         return True
 
     # -- Embedder management --
@@ -890,7 +1181,6 @@ class Dimension:
             json.dump(config, f)
 
         # Load new embedder
-        self._save_embedder()
         self._embedder = self._load_embedder(device=device)
 
         info = {
@@ -901,12 +1191,21 @@ class Dimension:
         if reindex:
             count = self._reindex_embeddings()
             info["reindexed"] = count
+        else:
+            logger.warning(
+                "set_embedder(reindex=False): embedder changed without reindexing; "
+                "existing vectors will be mismatched with the new model"
+            )
 
         return info
 
     def _reindex_embeddings(self) -> int:
-        """Re-embed all entities with the current embedder and rebuild FAISS."""
-        rows = self._db.execute(
+        """Re-embed all entities with the current embedder and rebuild store.
+
+        Creates a backup of store files before clearing so a failed embed
+        can be rolled back. Removes the backup on success.
+        """
+        rows = self._db_execute(
             "SELECT id, content, metadata, source_file FROM entities"
         ).fetchall()
         if not rows:
@@ -921,13 +1220,35 @@ class Dimension:
             md["source_file"] = r[3] or ""
             metadatas.append(md)
 
-        from alt_memory.backends.faiss_store import FaissStore
         if self._store:
             self._store.close()
-        for f in ["index.faiss", "metadata.db", "seq.txt"]:
-            (self._data_dir / f).unlink(missing_ok=True)
-        self._store = FaissStore(str(self._data_dir))
-        self._store.add(ids, contents, metadatas, vectors)
+
+        import shutil
+        backup_dir = self._data_dir.parent / ".reindex_backup"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        for fname in _STORE_BACKUP_FILES:
+            src = self._data_dir / fname
+            if src.exists():
+                shutil.copy2(src, backup_dir / fname)
+
+        try:
+            for fname in _STORE_BACKUP_FILES:
+                (self._data_dir / fname).unlink(missing_ok=True)
+
+            self._store = self._create_store()
+            self._store.add(ids, contents, metadatas, vectors)
+        except Exception:
+            for fname in _STORE_BACKUP_FILES:
+                bak = backup_dir / fname
+                if bak.exists():
+                    shutil.copy2(bak, self._data_dir / fname)
+                else:
+                    (self._data_dir / fname).unlink(missing_ok=True)
+            self._store = self._create_store()
+            raise
+        finally:
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir, ignore_errors=True)
 
         return len(ids)
 
@@ -935,10 +1256,10 @@ class Dimension:
 
     def memories_filed_away(self) -> dict:
         """Check when the last memory was saved and total counts."""
-        last = self._db.execute(
+        last = self._db_execute(
             "SELECT created_at, content FROM entities ORDER BY created_at DESC LIMIT 1"
         ).fetchone()
-        total = self._db.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+        total = self._db_execute("SELECT COUNT(*) FROM entities").fetchone()[0]
         preview = None
         last_time = None
         if last:
@@ -1022,6 +1343,7 @@ def build_closet_lines(
     text: str,
     existing: dict[str, str],
     source_line: Optional[str] = None,
+    drawer_ids: Optional[list[str]] = None,
 ) -> list[dict]:
     """Build closet-line entries from text, grouping named-entity snippets.
 
@@ -1053,6 +1375,8 @@ def build_closet_lines(
             collapsed = collapsed[:CLOSET_CHAR_LIMIT]
         existing_meta = existing.get("_meta", "")
         merged = existing_meta + "\n" + collapsed if existing_meta else collapsed
+        if len(merged) > CLOSET_CHAR_LIMIT:
+            merged = merged[-CLOSET_CHAR_LIMIT:]
         return [{"entity": "_meta", "content": merged.strip()}]
 
     result: list[dict] = []
@@ -1061,13 +1385,17 @@ def build_closet_lines(
         if e in seen_entities:
             continue
         seen_entities.add(e)
-        window_start = max(0, text.lower().find(e.lower()) - CLOSET_EXTRACT_WINDOW)
+        match = re.search(r'\b' + re.escape(e) + r'\b', text, re.IGNORECASE)
+        pos = match.start() if match else text.lower().find(e.lower())
+        window_start = max(0, pos - CLOSET_EXTRACT_WINDOW)
         window_end = min(len(text), window_start + 2 * CLOSET_EXTRACT_WINDOW + len(e))
         snippet = text[window_start:window_end].strip()
         if len(snippet) > CLOSET_CHAR_LIMIT:
             snippet = snippet[:CLOSET_CHAR_LIMIT]
         existing_content = existing.get(e, "")
         merged = existing_content + "\n" + snippet if existing_content else snippet
+        if len(merged) > CLOSET_CHAR_LIMIT:
+            merged = merged[-CLOSET_CHAR_LIMIT:]
         result.append({"entity": e, "content": merged.strip()})
     return result
 
@@ -1125,7 +1453,7 @@ class _ClosetCollection:
 
     def upsert(self, documents: list[str], ids: list[str], metadatas: Optional[list[dict]] = None) -> None:
         if metadatas is None:
-            metadatas = [{}] * len(documents)
+            metadatas = [{} for _ in range(len(documents))]
         for doc, cid, meta in zip(documents, ids, metadatas):
             self._conn.execute(
                 "INSERT OR REPLACE INTO closets (id, content, metadata, source_file, realm, domain) "
@@ -1157,7 +1485,7 @@ def get_closets_collection(dim_path: str, create: bool = True) -> _ClosetCollect
     return _ClosetCollection(conn)
 
 
-def file_already_mined(db_or_conn, source_file: str, check_mtime: bool = False, extract_mode: Optional[str] = None) -> bool:
+def file_already_mined(db_or_conn, source_file: str, check_mtime: bool = False) -> bool:
     """Check if a source file has already been mined (has sentinel or closets rows).
 
     Parameters
@@ -1169,8 +1497,6 @@ def file_already_mined(db_or_conn, source_file: str, check_mtime: bool = False, 
     check_mtime :
         If True, also re-mine if the source file's mtime has changed (i.e. the file
         was updated after the last mine).
-    extract_mode :
-        If set to "format", scope the check to format-mode sentinels.
     """
     try:
         if hasattr(db_or_conn, "_db"):
@@ -1193,15 +1519,17 @@ def file_already_mined(db_or_conn, source_file: str, check_mtime: bool = False, 
             if stored_mtime is not None and current_mtime > stored_mtime:
                 return False
         return True
-    except Exception:
+    except (sqlite3.Error, ValueError, json.JSONDecodeError):
         return False
 
 
-def purge_file_closets(closets_col, source_file: str) -> None:
+def purge_file_closets(closets_col, source_file: str) -> int:
     try:
-        closets_col.delete(where={"source_file": source_file})
+        result = closets_col.delete(where={"source_file": source_file})
+        return len(result[0]) if result and result[0] else 0
     except Exception:
         logger.debug("Closet purge failed for %s", source_file, exc_info=True)
+        return 0
 
 
 def upsert_closet_lines(closets_col, closet_id_base, lines, metadata):

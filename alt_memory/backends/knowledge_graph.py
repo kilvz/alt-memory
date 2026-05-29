@@ -1,6 +1,5 @@
 """Temporal knowledge graph - SQLite-backed entity-relationship store."""
 
-import hashlib
 import json
 import logging
 import sqlite3
@@ -13,7 +12,7 @@ from alt_memory.config import sanitize_iso_temporal
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_KG_PATH = None
+
 
 
 def _is_date_only_temporal(value: str) -> bool:
@@ -36,7 +35,12 @@ def _temporal_end_key(value: Optional[str]) -> Optional[str]:
     return value
 
 
+_TEMPORAL_COLUMN_WHITELIST = {"t.valid_from", "t.valid_to", "valid_from", "valid_to"}
+
+
 def _sql_temporal_start_expr(column: str) -> str:
+    if column not in _TEMPORAL_COLUMN_WHITELIST:
+        raise ValueError(f"Invalid column name: {column!r}")
     return (
         f"CASE WHEN length({column}) = 10 "
         f"AND substr({column}, 5, 1) = '-' "
@@ -46,6 +50,8 @@ def _sql_temporal_start_expr(column: str) -> str:
 
 
 def _sql_temporal_end_expr(column: str) -> str:
+    if column not in _TEMPORAL_COLUMN_WHITELIST:
+        raise ValueError(f"Invalid column name: {column!r}")
     return (
         f"CASE WHEN length({column}) = 10 "
         f"AND substr({column}, 5, 1) = '-' "
@@ -77,6 +83,7 @@ class KnowledgeGraph:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = None
         self._lock = threading.Lock()
+        self._closed = False
         self._init_db()
 
     def _init_db(self) -> None:
@@ -101,15 +108,17 @@ class KnowledgeGraph:
         conn.commit()
         self._connection = conn
 
+    _MIGRATE_COL_WHITELIST = {
+        "confidence": "REAL DEFAULT 1.0",
+        "source_closet": "TEXT",
+        "source_file": "TEXT",
+        "source_entity_id": "TEXT",
+        "adapter_name": "TEXT",
+    }
+
     def _migrate_schema(self, conn) -> None:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(facts)").fetchall()}
-        for col, dtype in [
-            ("confidence", "REAL DEFAULT 1.0"),
-            ("source_closet", "TEXT"),
-            ("source_file", "TEXT"),
-            ("source_entity_id", "TEXT"),
-            ("adapter_name", "TEXT"),
-        ]:
+        for col, dtype in self._MIGRATE_COL_WHITELIST.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE facts ADD COLUMN {col} {dtype}")
         if "source_drawer_id" in existing and "source_entity_id" not in existing:
@@ -118,6 +127,8 @@ class KnowledgeGraph:
             logger.info("_migrate_schema: migrated source_drawer_id → source_entity_id")
 
     def _conn(self):
+        if self._closed:
+            raise RuntimeError("KnowledgeGraph is closed")
         if self._connection is None:
             self._connection = sqlite3.connect(str(self._db_path), check_same_thread=False)
             self._connection.row_factory = sqlite3.Row
@@ -129,15 +140,16 @@ class KnowledgeGraph:
 
     # ── Write operations ──────────────────────────────────────────────────
 
-    def add(self, subject: str, predicate: str, object: str,
+    def add(self, subject: str, predicate: str, obj: str,
             valid_from: Optional[str] = None, valid_to: Optional[str] = None,
             source: str = "") -> int:
         """Add a fact. Backward-compatible — keeps existing signature."""
+        pred = predicate.lower().replace(" ", "_")
         with self._lock:
             cur = self._conn().execute(
                 "INSERT INTO facts (subject, predicate, object, valid_from, valid_to, source) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
-                (subject, predicate, object, valid_from, valid_to, source))
+                (subject, pred, obj, valid_from, valid_to, source))
             self._conn().commit()
             return cur.lastrowid
 
@@ -154,7 +166,7 @@ class KnowledgeGraph:
             conn.commit()
         return eid
 
-    def add_triple(self, subject: str, predicate: str, object: str,
+    def add_triple(self, subject: str, predicate: str, obj: str,
                    valid_from: Optional[str] = None,
                    valid_to: Optional[str] = None,
                    confidence: float = 1.0,
@@ -165,7 +177,7 @@ class KnowledgeGraph:
         """Add a relationship triple with full provenance and temporal validation.
 
         Sanitizes temporal values, rejects inverted intervals, auto-creates
-        entity entries, and skips duplicate active triples.
+        entity entries, and updates existing active triples with new metadata.
 
         Returns the integer row ID of the facts table entry.
         """
@@ -177,7 +189,7 @@ class KnowledgeGraph:
                 f"valid_to={valid_to!r} is before valid_from={valid_from!r}; "
                 "an inverted interval would be invisible to every KG query")
         sub_id = self._entity_id(subject)
-        obj_id = self._entity_id(object)
+        obj_id = self._entity_id(obj)
         pred = predicate.lower().replace(" ", "_")
         with self._lock:
             conn = self._conn()
@@ -186,17 +198,24 @@ class KnowledgeGraph:
                 (sub_id, subject))
             conn.execute(
                 "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)",
-                (obj_id, object))
+                (obj_id, obj))
             existing = conn.execute(
                 "SELECT id FROM facts WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
-                (subject, pred, object)).fetchone()
+                (subject, pred, obj)).fetchone()
             if existing:
+                conn.execute(
+                    "UPDATE facts SET valid_from=?, valid_to=?, confidence=?, "
+                    "source_closet=?, source_file=?, source_entity_id=?, adapter_name=? "
+                    "WHERE id=?",
+                    (valid_from, valid_to, confidence, source_closet, source_file,
+                     source_entity_id, adapter_name, existing["id"]))
+                conn.commit()
                 return existing["id"]
             conn.execute(
                 "INSERT INTO facts (subject, predicate, object, valid_from, valid_to, "
                 "confidence, source_closet, source_file, source_entity_id, adapter_name) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (subject, pred, object, valid_from, valid_to,
+                (subject, pred, obj, valid_from, valid_to,
                  confidence, source_closet, source_file, source_entity_id, adapter_name))
             conn.commit()
             return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -212,10 +231,11 @@ class KnowledgeGraph:
         ended = sanitize_iso_temporal(ended, "ended")
         with self._lock:
             conn = self._conn()
+            pred = predicate.lower().replace(" ", "_")
             rows = conn.execute(
                 "SELECT id, valid_from FROM facts "
                 "WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
-                (subject, predicate, object)).fetchall()
+                (subject, pred, object)).fetchall()
             for row in rows:
                 vf = row["valid_from"]
                 if vf is not None and _temporal_end_key(ended) < _temporal_start_key(vf):
@@ -225,7 +245,7 @@ class KnowledgeGraph:
             cur = conn.execute(
                 "UPDATE facts SET valid_to=? "
                 "WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
-                (ended, subject, predicate, object))
+                (ended, subject, pred, object))
             conn.commit()
             return cur.rowcount
 
@@ -246,13 +266,19 @@ class KnowledgeGraph:
             if len(conditions) == 2:
                 conditions = [f"({' OR '.join(conditions)})"]
         if predicate:
+            pred = predicate.lower().replace(" ", "_")
             conditions.append("predicate = ?")
-            params.append(predicate)
+            params.append(pred)
         if as_of:
-            conditions.append("(valid_from IS NULL OR valid_from <= ?)")
-            params.append(as_of)
-            conditions.append("(valid_to IS NULL OR valid_to > ?)")
-            params.append(as_of)
+            as_of = sanitize_iso_temporal(as_of, "as_of")
+            as_of_key = _temporal_start_key(as_of)
+            valid_from_expr = _sql_temporal_start_expr("valid_from")
+            valid_to_expr = _sql_temporal_end_expr("valid_to")
+            conditions.append(
+                f"(valid_from IS NULL OR {valid_from_expr} <= ?) "
+                f"AND (valid_to IS NULL OR {valid_to_expr} >= ?)"
+            )
+            params.extend([as_of_key, as_of_key])
         sql = "SELECT * FROM facts"
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
@@ -290,7 +316,10 @@ class KnowledgeGraph:
                         "valid_from": r["valid_from"],
                         "valid_to": r["valid_to"],
                         "confidence": r["confidence"] if r["confidence"] is not None else 1.0,
-                        "source_closet": r["source_closet"],
+                        "source_closet": r.get("source_closet"),
+                        "source_file": r.get("source_file"),
+                        "source_entity_id": r.get("source_entity_id"),
+                        "adapter_name": r.get("adapter_name"),
                         "current": r["valid_to"] is None,
                     })
             if direction in ("incoming", "both"):
@@ -306,7 +335,10 @@ class KnowledgeGraph:
                         "valid_from": r["valid_from"],
                         "valid_to": r["valid_to"],
                         "confidence": r["confidence"] if r["confidence"] is not None else 1.0,
-                        "source_closet": r["source_closet"],
+                        "source_closet": r.get("source_closet"),
+                        "source_file": r.get("source_file"),
+                        "source_entity_id": r.get("source_entity_id"),
+                        "adapter_name": r.get("adapter_name"),
                         "current": r["valid_to"] is None,
                     })
         return results
@@ -402,29 +434,30 @@ class KnowledgeGraph:
             parent = facts.get("parent")
             if parent:
                 self.add_triple(
-                    name, "child_of", parent.capitalize(),
+                    name, "child_of", parent,
                     valid_from=facts.get("birthday"))
             partner = facts.get("partner")
             if partner:
-                self.add_triple(name, "married_to", partner.capitalize())
+                self.add_triple(name, "married_to", partner)
             relationship = facts.get("relationship", "")
             if relationship == "daughter":
-                self.add_triple(
-                    name, "is_child_of",
-                    facts.get("parent", "").capitalize() or name,
-                    valid_from=facts.get("birthday"))
+                parent = (facts.get("parent") or "").capitalize()
+                if parent and parent != name:
+                    self.add_triple(
+                        name, "is_child_of", parent,
+                        valid_from=facts.get("birthday"))
             elif relationship == "husband":
-                self.add_triple(
-                    name, "is_partner_of",
-                    facts.get("partner", name).capitalize())
+                partner = (facts.get("partner") or "").capitalize()
+                if partner and partner != name:
+                    self.add_triple(name, "is_partner_of", partner)
             elif relationship == "brother":
-                self.add_triple(
-                    name, "is_sibling_of",
-                    facts.get("sibling", name).capitalize())
+                sibling = (facts.get("sibling") or "").capitalize()
+                if sibling and sibling != name:
+                    self.add_triple(name, "is_sibling_of", sibling)
             elif relationship == "dog":
-                self.add_triple(
-                    name, "is_pet_of",
-                    facts.get("owner", name).capitalize())
+                owner = (facts.get("owner") or "").capitalize()
+                if owner and owner != name:
+                    self.add_triple(name, "is_pet_of", owner)
                 self.add_entity(name, "animal")
             for interest in facts.get("interests", []):
                 self.add_triple(name, "loves", interest.capitalize(),
@@ -437,6 +470,7 @@ class KnowledgeGraph:
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
+                self._closed = True
 
     def __enter__(self):
         return self

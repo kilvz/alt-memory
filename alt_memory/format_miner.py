@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 SUPPORTED_FORMATS = frozenset({".pdf", ".docx", ".pptx", ".xlsx", ".rtf", ".epub"})
 DEFAULT_MAX_FILE_SIZE = 500 * 1024 * 1024
-DRAWER_UPSERT_BATCH_SIZE = 1000
+ENTITY_UPSERT_BATCH_SIZE = 1000
 
 _SKIP_FILENAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 _ENCRYPTED_PATTERNS = re.compile(r"(encrypt|decrypt|password|protected)", re.IGNORECASE)
@@ -213,28 +213,20 @@ def _register_format_sentinel(
 ) -> None:
     sentinel_id = f"sentinel_format_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
     try:
-        closets_col._conn.execute(
-            "INSERT OR REPLACE INTO closets (id, content, metadata, source_file, realm, domain) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (
-                sentinel_id,
-                "[empty]",
-                json.dumps({
-                    "realm": realm,
-                    "domain": "documents",
-                    "source_file": source_file,
-                    "added_by": agent,
-                    "filed_at": datetime.now().isoformat(),
-                    "ingest_mode": "extract",
-                    "extract_mode": "format",
-                    "is_sentinel": True,
-                }),
-                source_file,
-                realm,
-                "documents",
-            ),
+        closets_col.upsert(
+            documents=["[empty]"],
+            ids=[sentinel_id],
+            metadatas=[{
+                "realm": realm,
+                "domain": "documents",
+                "source_file": source_file,
+                "added_by": agent,
+                "filed_at": datetime.now().isoformat(),
+                "ingest_mode": "extract",
+                "extract_mode": "format",
+                "is_sentinel": True,
+            }],
         )
-        closets_col._conn.commit()
     except Exception:
         logger.debug("Sentinel write failed for %s", source_file, exc_info=True)
 
@@ -247,9 +239,9 @@ def _register_skip_sentinel_if_appropriate(
     _register_format_sentinel(closets_col, source_file, realm, agent)
 
 
-def _format_drawer_id(realm: str, domain: str, source_file: str, chunk_index: int) -> str:
+def _format_entity_id(realm: str, domain: str, source_file: str, chunk_index: int) -> str:
     key = f"{realm}|{domain}|{source_file}|{chunk_index}"
-    return f"drawer_format_{hashlib.sha256(key.encode()).hexdigest()[:24]}"
+    return f"entity_format_{hashlib.sha256(key.encode()).hexdigest()[:24]}"
 
 
 def mine_formats(
@@ -268,7 +260,7 @@ def mine_formats(
 
     files: list[Path] = []
     closets_col = None
-    total_drawers = 0
+    total_entities = 0
     files_skipped = 0
     files_with_text = 0
     files_errored = 0
@@ -301,7 +293,7 @@ def mine_formats(
                     source_mtime = None
 
                 if not dry_run and file_already_mined(
-                    closets_col._conn, source_file, check_mtime=True, extract_mode="format"
+                    closets_col._conn, source_file, check_mtime=True
                 ):
                     files_skipped += 1
                     continue
@@ -334,22 +326,25 @@ def mine_formats(
                 files_with_text += 1
 
                 if dry_run:
-                    print(f"    [DRY RUN] {filepath.name} → {len(chunks)} drawers")
-                    total_drawers += len(chunks)
+                    print(f"    [DRY RUN] {filepath.name} → {len(chunks)} entities")
+                    total_entities += len(chunks)
                     continue
 
-                drawers_added = 0
+                entities_added = 0
                 with mine_lock(source_file):
                     if file_already_mined(
-                        closets_col._conn, source_file, check_mtime=True, extract_mode="format"
+                        closets_col._conn, source_file, check_mtime=True
                     ):
                         files_skipped += 1
                         continue
 
-                    for batch_start in range(0, len(chunks), DRAWER_UPSERT_BATCH_SIZE):
-                        batch = chunks[batch_start:batch_start + DRAWER_UPSERT_BATCH_SIZE]
+                    for batch_start in range(0, len(chunks), ENTITY_UPSERT_BATCH_SIZE):
+                        batch = chunks[batch_start:batch_start + ENTITY_UPSERT_BATCH_SIZE]
+                        batch_ids: list[str] = []
+                        batch_docs: list[str] = []
+                        batch_metas: list[dict] = []
                         for chunk in batch:
-                            drawer_id = _format_drawer_id(realm, domain, source_file, chunk["chunk_index"])
+                            entity_id = _format_entity_id(realm, domain, source_file, chunk["chunk_index"])
                             content = chunk["content"]
                             entities = _extract_entities_for_metadata(content)
                             meta = {
@@ -366,23 +361,14 @@ def mine_formats(
                                 meta["source_mtime"] = source_mtime
                             if entities:
                                 meta["entities"] = entities
-                            closets_col._conn.execute(
-                                "INSERT OR REPLACE INTO closets (id, content, metadata, source_file, realm, domain) "
-                                "VALUES (?, ?, ?, ?, ?, ?)",
-                                (
-                                    drawer_id,
-                                    content,
-                                    json.dumps(meta),
-                                    source_file,
-                                    realm,
-                                    domain,
-                                ),
-                            )
-                        closets_col._conn.commit()
-                        drawers_added += len(batch)
+                            batch_ids.append(entity_id)
+                            batch_docs.append(content)
+                            batch_metas.append(meta)
+                        closets_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
+                        entities_added += len(batch)
 
-                total_drawers += drawers_added
-                print(f"  + [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers_added}")
+                total_entities += entities_added
+                print(f"  + [{i:4}/{len(files)}] {filepath.name[:50]:50} +{entities_added}")
 
             except Exception as exc:
                 files_errored += 1
@@ -403,11 +389,11 @@ def mine_formats(
     print(f"  Files extracted:   {files_with_text}")
     print(f"  Files skipped:     {files_skipped}")
     print(f"  Files errored:     {files_errored}")
-    print(f"  Total drawers:     {total_drawers}")
+    print(f"  Total entities:    {total_entities}")
     if status_counts:
         print("  Extraction status:")
         for name, count in sorted(status_counts.items(), key=lambda kv: -kv[1]):
             print(f"    {name:30} {count}")
     print(f"{'=' * 55}\n")
 
-    return {"files": len(files), "drawers": total_drawers, "errors": files_errored}
+    return {"files": len(files), "entities": total_entities, "errors": files_errored}

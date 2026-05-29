@@ -118,7 +118,7 @@ DEFAULT_HALL_KEYWORDS = {
         "consciousness", "conscious", "aware", "real",
         "genuine", "soul", "exist", "alive",
     ],
-    "memory": ["memory", "remember", "forget", "recall", "archive", "palace", "store"],
+    "memory": ["memory", "remember", "forget", "recall", "archive", "store"],
     "technical": [
         "code", "python", "script", "bug", "error",
         "function", "api", "database", "server",
@@ -164,7 +164,11 @@ class AltMemoryConfig:
 
     @property
     def tunnel_file(self):
-        return os.path.join(os.path.dirname(self.dim_path), "tunnels.json")
+        return os.path.join(self.dim_path, "tunnels.json")
+
+    @property
+    def hallway_file(self):
+        return os.path.join(self.dim_path, "hallways.json")
 
     @property
     def topic_realms(self):
@@ -374,7 +378,7 @@ class AltMemoryConfig:
     def set_default_embedder(self, model: str) -> str:
         model = model.strip().lower()
         if model not in ("sentence", "spacy", "numpy", "bert", "minilm", "embeddinggemma"):
-            raise ValueError("default_embedder must be one of: sentence, spacy, numpy")
+            raise ValueError("default_embedder must be one of: sentence, spacy, numpy, bert, minilm, embeddinggemma")
         self._file_config["default_embedder"] = model
         self._config_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -383,15 +387,6 @@ class AltMemoryConfig:
         except OSError:
             pass
         return model
-
-    def _save_and_return(self, field: str):
-        self._config_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            with open(self._config_file, "w", encoding="utf-8") as f:
-                json.dump(self._file_config, f, indent=2, ensure_ascii=False)
-        except OSError:
-            pass
-        return self.get_hook_settings()
 
     def init(self):
         self._config_dir.mkdir(parents=True, exist_ok=True)

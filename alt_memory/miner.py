@@ -1,20 +1,50 @@
 """File mining pipeline for Alt Memory — mines files into dimension entities with entity extraction, dedup, and compression."""
 
 import ast
+import contextlib
+import hashlib
 import json
 import logging
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+import pathspec
+
 from alt_memory.dialect import aaak_compress
-from alt_memory.entity_detector import EntityDetector
 from alt_memory.entity_registry import EntityRegistry
-from alt_memory.dimension import Dimension, _ENTITY_STOPLIST
+from alt_memory.dimension import (
+    Dimension,
+    SKIP_DIRS,
+    MineAlreadyRunning,
+    mine_dimension_lock,
+    _ENTITY_STOPLIST,
+)
 
 logger = logging.getLogger(__name__)
+
+MAX_CHUNKS_PER_FILE = 50_000
+
+
+def resolve_max_chunks_per_file(cli_value: Optional[int] = None) -> int:
+    if cli_value is not None:
+        if cli_value <= 0:
+            logger.warning("Ignoring non-positive --max-chunks-per-file=%s; using default", cli_value)
+            return MAX_CHUNKS_PER_FILE
+        return cli_value
+    env = os.environ.get("ALT_MEMORY_MAX_CHUNKS_PER_FILE")
+    if env:
+        try:
+            val = int(env)
+            if val > 0:
+                return val
+        except (ValueError, TypeError):
+            pass
+    return MAX_CHUNKS_PER_FILE
+
 
 # ── Entity metadata extraction (for diary_ingest etc.) ──────────────────────
 
@@ -22,29 +52,33 @@ _ENTITY_EXTRACT_WINDOW = 1000
 _ENTITY_METADATA_LIMIT = 50
 
 
-def _load_known_entities(palace: Dimension) -> dict[str, dict]:
+def _load_known_entities(dim: Dimension) -> dict[str, dict]:
     """Load persisted known_entities from the knowledge graph."""
     from alt_memory.backends.knowledge_graph import KnowledgeGraph
 
-    kg_db = getattr(palace, "_kg_db", None)
+    kg_db = getattr(dim, "_kg_db", None)
     if kg_db:
-        kg = KnowledgeGraph(kg_db)
-        entities: dict[str, dict] = {}
-        for row in kg_db.execute(
-            "SELECT DISTINCT subject AS name FROM kg_facts"
-        ).fetchall():
-            name: str = row[0]
-            if not name or name in _ENTITY_STOPLIST:
-                continue
-            entities[name] = {"name": name, "in_kg": True}
-        return entities
+        try:
+            kg = KnowledgeGraph(kg_db)
+            entities: dict[str, dict] = {}
+            for row in kg_db.execute(
+                "SELECT DISTINCT subject AS name FROM kg_facts"
+            ).fetchall():
+                name: str = row[0]
+                if not name or name in _ENTITY_STOPLIST:
+                    continue
+                entities[name] = {"name": name, "in_kg": True}
+            return entities
+        except Exception:
+            logger.warning("Failed to load known entities from KG", exc_info=True)
+            return {}
     return {}
 
 
 def _extract_entities_for_metadata(
-    text: str, palace: Dimension, limit: int = _ENTITY_METADATA_LIMIT
+    text: str, dim: Dimension, limit: int = _ENTITY_METADATA_LIMIT
 ) -> list[dict]:
-    """Extract named-entity metadata from text for drawer metadata.
+    """Extract named-entity metadata from text for entity metadata.
 
     Returns a list of dicts, each with keys: ``name``, ``type``, ``count``.
     """
@@ -54,7 +88,7 @@ def _extract_entities_for_metadata(
     coca = _get_coca_filter()
     ep = get_entity_patterns()
     stopwords = frozenset(w.lower() for w in ep.get("stopwords", []))
-    known = _load_known_entities(palace)
+    known = _load_known_entities(dim)
 
     cleaned, sys_counts = _apply_known_systems_prepass(text)
 
@@ -82,6 +116,79 @@ def _extract_entities_for_metadata(
             entry["in_kg"] = True
         result.append(entry)
     return result
+
+# ── Gitignore-aware directory scanning ─────────────────────────────────────
+
+
+class GitignoreMatcher:
+    """Lightweight .gitignore pattern matcher using pathspec."""
+
+    def __init__(self, root_dir: str):
+        self.root_dir = Path(root_dir).resolve()
+        self._spec = None
+        self._load_patterns()
+
+    def _load_patterns(self) -> None:
+        lines: list[str] = []
+        for gitignore in self.root_dir.rglob(".gitignore"):
+            if gitignore.is_file():
+                try:
+                    content = gitignore.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    continue
+                dir_prefix = str(gitignore.parent.relative_to(self.root_dir).as_posix())
+                for raw in content.splitlines():
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("\\#") or line.startswith("\\!"):
+                        line = line[1:]
+                    if dir_prefix == ".":
+                        lines.append(line)
+                    else:
+                        if line.startswith("/"):
+                            lines.append(f"/{dir_prefix}{line}")
+                        elif line.startswith("!"):
+                            rest = line[1:]
+                            if rest.startswith("/"):
+                                lines.append(f"!/{dir_prefix}{rest[1:]}")
+                            else:
+                                lines.append(f"!/{dir_prefix}/{rest}")
+                        else:
+                            lines.append(f"/{dir_prefix}/{line}")
+        if lines:
+            self._spec = pathspec.PathSpec.from_lines("gitwildmatch", lines)
+
+    def is_ignored(self, rel_path: str, is_dir: bool = False) -> bool:
+        if self._spec is None:
+            return False
+        posix = rel_path.replace("\\", "/")
+        if is_dir and not posix.endswith("/"):
+            posix += "/"
+        return self._spec.match_file(posix)
+
+    def match_file(self, rel_path: str, is_dir: bool = False) -> bool:
+        return self.is_ignored(rel_path, is_dir=is_dir)
+
+
+def load_gitignore_matcher(root_dir: str) -> Optional[GitignoreMatcher]:
+    matcher = GitignoreMatcher(root_dir)
+    if matcher._spec is None:
+        return None
+    return matcher
+
+
+def should_skip_dir(dirname: str) -> bool:
+    return dirname in SKIP_DIRS or dirname.endswith(".egg-info")
+
+
+def is_gitignored(rel_path: str, matchers: list, is_dir: bool = False) -> bool:
+    ignored = False
+    for matcher in matchers:
+        if matcher.is_ignored(rel_path, is_dir=is_dir):
+            ignored = True
+    return ignored
+
 
 # ── File type classifications ──────────────────────────────────────────────
 
@@ -124,12 +231,6 @@ def _classify_file(filepath: str) -> str:
 
 def _get_source_path(filepath: str) -> str:
     return str(Path(filepath).resolve())
-
-
-def _already_mined(palace: "Dimension", filepath: str) -> bool:
-    resolved = _get_source_path(filepath)
-    drawers = palace.list_entities(limit=10000)
-    return any(d.get("source_file", "") == resolved for d in drawers)
 
 
 # ── Code comment extraction ────────────────────────────────────────────────
@@ -243,8 +344,10 @@ def _extract_code_comments(filepath: str, source: str) -> list[str]:
     elif ext in _CODE_EXTENSIONS - {".py"}:
         if ext in (".rb", ".pl", ".pm", ".sh", ".bash", ".zsh", ".ps1", ".r"):
             items = _extract_generic_comments(source, "#", has_block=False)
-        elif ext in (".lua", ".ex", ".exs", "--"):
+        elif ext == ".lua":
             items = _extract_generic_comments(source, "--", has_block=False)
+        elif ext in (".ex", ".exs"):
+            items = _extract_generic_comments(source, "#", has_block=False)
         else:
             items = _extract_generic_comments(source, "//")
     else:
@@ -275,6 +378,14 @@ def _chunk_text(content: str, min_size: int = 50, max_size: int = 2000) -> list[
             buf: list[str] = []
             buf_len = 0
             for line in lines:
+                # Split individual lines that exceed max_size
+                while len(line) > max_size:
+                    if buf:
+                        result.append("\n".join(buf).strip())
+                        buf = []
+                        buf_len = 0
+                    result.append(line[:max_size])
+                    line = line[max_size:]
                 buf.append(line)
                 buf_len += len(line) + 1
                 if buf_len >= max_size:
@@ -293,7 +404,7 @@ def _chunk_text(content: str, min_size: int = 50, max_size: int = 2000) -> list[
 
 
 def _add_chunk(
-    palace: "Dimension",
+    dim: "Dimension",
     content: str,
     realm: str,
     domain: str,
@@ -305,7 +416,10 @@ def _add_chunk(
     if len(content.strip()) < 10:
         return None
 
-    dup = palace.check_duplicate(content, threshold=0.85)
+    try:
+        dup = dim.check_duplicate(content, threshold=0.85)
+    except Exception:
+        return None
     if dup:
         return None
 
@@ -315,7 +429,7 @@ def _add_chunk(
         meta["content_date"] = content_date
 
     try:
-        drawer_id = palace.add_entity(
+        drawer_id = dim.add_entity(
             realm=realm,
             domain=domain,
             content=final_content,
@@ -326,6 +440,121 @@ def _add_chunk(
         return None
 
     return drawer_id
+
+
+# ── PID file for mine concurrency guard ─────────────────────────────────────
+
+
+def _mine_pid_file_path(dim_path: str) -> str:
+    pid_dir = os.path.join(os.path.expanduser("~"), ".alt-memory")
+    os.makedirs(pid_dir, exist_ok=True)
+    key = hashlib.sha256(os.path.realpath(dim_path).encode()).hexdigest()[:16]
+    return os.path.join(pid_dir, f"mine_{key}.pid")
+
+
+def _write_mine_pid_file(dim_path: str) -> None:
+    pid_file = _mine_pid_file_path(dim_path)
+    try:
+        with open(pid_file, "w") as f:
+            f.write(f"{os.getpid()} {datetime.now().timestamp()}\n")
+    except OSError:
+        pass
+
+
+def _read_mine_pid_file(dim_path: str) -> Optional[dict]:
+    pid_file = _mine_pid_file_path(dim_path)
+    if not os.path.exists(pid_file):
+        return None
+    try:
+        with open(pid_file) as f:
+            content = f.read().strip()
+        if not content:
+            return None
+        parts = content.split()
+        pid = int(parts[0])
+        ts = float(parts[1]) if len(parts) > 1 else 0.0
+        return {"pid": pid, "timestamp": ts}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _cleanup_mine_pid_file(dim_path: str) -> None:
+    pid_file = _mine_pid_file_path(dim_path)
+    try:
+        if os.path.exists(pid_file):
+            with open(pid_file) as f:
+                content = f.read().strip()
+            if content:
+                parts = content.split()
+                pid_token = parts[0] if parts else ""
+                if pid_token.isdigit() and int(pid_token) == os.getpid():
+                    os.unlink(pid_file)
+    except OSError:
+        pass
+
+
+def _acquire_or_refuse(dim_path: str) -> None:
+    """Check PID file and raise MineAlreadyRunning if another mine is active."""
+    info = _read_mine_pid_file(dim_path)
+    if info is None:
+        return
+    if _pid_alive(info["pid"]):
+        raise MineAlreadyRunning(
+            f"dimension {dim_path} is already being mined by PID {info['pid']}; "
+            "wait for it to finish or stop it before retrying"
+        )
+    _cleanup_mine_pid_file(dim_path)
+
+
+# ── Post-mine knowledge graph enrichment ────────────────────────────────────
+
+
+def _compute_topic_tunnels_for_wing(realm: str, dimension: "Dimension") -> int:
+    """Create cross-realm tunnels from shared topic labels in entity metadata."""
+    try:
+        entities = dimension.list_entities(realm=realm, limit=10000)
+        topics: set[str] = set()
+        for e in entities:
+            meta = e.get("metadata", {})
+            topic = meta.get("topic", "")
+            if topic:
+                topics.add(topic)
+        if not topics:
+            return 0
+        tunnels_created = 0
+        all_realms = dimension.list_realms()
+        for topic in sorted(topics):
+            for other in all_realms:
+                if other["name"] == realm:
+                    continue
+                other_entities = dimension.list_entities(
+                    realm=other["name"], domain=topic, limit=1,
+                )
+                if other_entities:
+                    from alt_memory.dim_graph import create_tunnel
+                    create_tunnel(
+                        source_realm=realm,
+                        source_domain=topic,
+                        target_realm=other["name"],
+                        target_domain=topic,
+                        label=f"Shared topic: {topic}",
+                        dimension=dimension,
+                        kind="topic",
+                    )
+                    tunnels_created += 1
+        logger.info("Topic tunnel computation for realm %s: %d tunnel(s) created", realm, tunnels_created)
+        return tunnels_created
+    except Exception:
+        logger.debug("Topic tunnel computation failed for realm %s", realm, exc_info=True)
+        return 0
 
 
 # ── Content-date extraction ──────────────────────────────────────────────────
@@ -501,12 +730,13 @@ def _extract_content_date(source_file: str, content: str) -> Optional[str]:
 
 
 def mine_file_into_dimension(
-    palace: "Dimension",
+    dim: "Dimension",
     filepath: str,
     realm: str,
     domain: str,
     min_chunk_size: int = 50,
     max_chunk_size: int = 2000,
+    max_chunks_per_file: Optional[int] = None,
 ) -> int:
     resolved = _get_source_path(filepath)
 
@@ -545,7 +775,16 @@ def mine_file_into_dimension(
     else:
         chunks = _chunk_text(content, min_chunk_size, max_chunk_size)
 
-    registry = EntityRegistry(palace)
+    effective_cap = resolve_max_chunks_per_file(max_chunks_per_file)
+    if effective_cap > 0 and len(chunks) > effective_cap:
+        logger.warning(
+            "File %s produced %d chunks (> %d cap); skipping. "
+            "Raise via --max-chunks-per-file or ALT_MEMORY_MAX_CHUNKS_PER_FILE (0 to disable)",
+            filepath, len(chunks), effective_cap,
+        )
+        return 0
+
+    registry = EntityRegistry(dim)
     created = 0
 
     for chunk in chunks:
@@ -555,7 +794,7 @@ def mine_file_into_dimension(
         registry.register(chunk, source=resolved)
 
         drawer_id = _add_chunk(
-            palace,
+            dim,
             chunk,
             realm=realm,
             domain=domain,
@@ -572,7 +811,7 @@ def mine_file_into_dimension(
 
 
 def mine_text_into_dimension(
-    palace: "Dimension",
+    dim: "Dimension",
     text: str,
     realm: str,
     domain: str,
@@ -588,7 +827,7 @@ def mine_text_into_dimension(
     else:
         chunks = [text.strip()]
 
-    registry = EntityRegistry(palace)
+    registry = EntityRegistry(dim)
     created = 0
 
     for c in chunks:
@@ -596,7 +835,7 @@ def mine_text_into_dimension(
             continue
         registry.register(c, source=source)
         drawer_id = _add_chunk(
-            palace, c, realm=realm, domain=domain, source_file=source,
+            dim, c, realm=realm, domain=domain, source_file=source,
         )
         if drawer_id:
             created += 1
@@ -605,7 +844,7 @@ def mine_text_into_dimension(
 
 
 def mine_conversation(
-    palace: "Dimension",
+    dim: "Dimension",
     log_text: str,
     realm: str = "conversations",
     source: str = "",
@@ -613,7 +852,7 @@ def mine_conversation(
     if not log_text.strip():
         return 0
 
-    registry = EntityRegistry(palace)
+    registry = EntityRegistry(dim)
     created = 0
 
     for m in _CONVERSATION_LINE_RE.finditer(log_text):
@@ -630,7 +869,7 @@ def mine_conversation(
         registry.register(content, source=source)
 
         drawer_id = _add_chunk(
-            palace,
+            dim,
             content,
             realm=realm,
             domain=speaker.lower().replace(" ", "_"),
@@ -644,11 +883,13 @@ def mine_conversation(
 
 
 def batch_mine(
-    palace: "Dimension",
+    dim: "Dimension",
     directory: str,
     realm: str = "files",
     pattern: str = "*.txt,*.md,*.py,*.json,*.yaml,*.yml,*.cfg,*.ini,*.log",
     recursive: bool = True,
+    max_chunks_per_file: Optional[int] = None,
+    respect_gitignore: bool = True,
 ) -> dict:
     base = Path(directory).resolve()
     if not base.is_dir():
@@ -658,6 +899,9 @@ def batch_mine(
             "drawers_created": 0,
             "errors": [f"Directory not found: {directory}"],
         }
+
+    dim_path = str(dim._base)
+    _acquire_or_refuse(dim_path)
 
     patterns = [p.strip() for p in pattern.split(",") if p.strip()]
     files: list[Path] = []
@@ -675,18 +919,48 @@ def batch_mine(
             seen.add(resolved)
             unique.append(f)
 
+    if respect_gitignore:
+        matcher = load_gitignore_matcher(str(base))
+        if matcher:
+            filtered: list[Path] = []
+            for fpath in unique:
+                try:
+                    rel = str(fpath.relative_to(base).as_posix())
+                except ValueError:
+                    filtered.append(fpath)
+                    continue
+                if should_skip_dir(fpath.parent.name):
+                    continue
+                if matcher.is_ignored(rel):
+                    continue
+                filtered.append(fpath)
+            unique = filtered
+
     total_created = 0
 
-    for fpath in unique:
+    with mine_dimension_lock(dim_path):
+        _write_mine_pid_file(dim_path)
         try:
-            domain = fpath.parent.relative_to(base).as_posix()
-            if domain == ".":
-                domain = "root"
-        except ValueError:
-            domain = "root"
+            for fpath in unique:
+                try:
+                    domain = fpath.parent.relative_to(base).as_posix()
+                    if domain == ".":
+                        domain = "root"
+                except ValueError:
+                    domain = "root"
 
-        n = mine_file_into_dimension(palace, str(fpath), realm=realm, domain=domain)
-        total_created += n
+                n = mine_file_into_dimension(
+                    dim, str(fpath), realm=realm, domain=domain,
+                    max_chunks_per_file=max_chunks_per_file,
+                )
+                total_created += n
+
+            tunnels = _compute_topic_tunnels_for_wing(realm, dim)
+            if tunnels:
+                logger.info("Post-mine: created %d topic tunnel(s) for realm %s", tunnels, realm)
+
+        finally:
+            _cleanup_mine_pid_file(dim_path)
 
     return {
         "realm": realm,
@@ -696,7 +970,7 @@ def batch_mine(
     }
 
 
-def mine_code_file(palace: "Dimension", filepath: str, realm: str = "code") -> int:
+def mine_code_file(dim: "Dimension", filepath: str, realm: str = "code") -> int:
     resolved = _get_source_path(filepath)
     ext = Path(resolved).suffix.lower()
 
@@ -704,7 +978,7 @@ def mine_code_file(palace: "Dimension", filepath: str, realm: str = "code") -> i
         logger.warning("Not a recognized code file: %s", resolved)
         return 0
 
-    return mine_file_into_dimension(palace, resolved, realm=realm, domain=ext.lstrip("."))
+    return mine_file_into_dimension(dim, resolved, realm=realm, domain=ext.lstrip("."))
 
 
 # ── Object-oriented API ────────────────────────────────────────────────────
@@ -713,9 +987,9 @@ def mine_code_file(palace: "Dimension", filepath: str, realm: str = "code") -> i
 class FileMiner:
     """Object-oriented file miner with progress tracking."""
 
-    def __init__(self, palace: "Dimension"):
-        self.palace = palace
-        self._entity_registry = EntityRegistry(palace)
+    def __init__(self, dim: "Dimension"):
+        self.dim = dim
+        self._entity_registry = EntityRegistry(dim)
         self._stats: dict[str, int] = {
             "processed": 0,
             "created": 0,
@@ -726,7 +1000,7 @@ class FileMiner:
     def mine(self, filepath: str, realm: str, domain: str) -> int:
         self._stats["processed"] += 1
         try:
-            n = mine_file_into_dimension(self.palace, filepath, realm, domain)
+            n = mine_file_into_dimension(self.dim, filepath, realm, domain)
             if n > 0:
                 self._stats["created"] += n
             else:

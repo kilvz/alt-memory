@@ -7,6 +7,7 @@ from alt_memory.backends.embedder import (
     NumpyEmbedder, SentenceTransformerEmbedder, SpacyGloveEmbedder, get_embedder,
 )
 from alt_memory.backends.faiss_store import FaissStore
+from alt_memory.backends.chroma_store import ChromaStore
 from alt_memory.backends.knowledge_graph import KnowledgeGraph
 
 from alt_memory.dialect import (
@@ -67,6 +68,7 @@ __all__ = [
     "SpacyGloveEmbedder",
     "get_embedder",
     "FaissStore",
+    "ChromaStore",
     "KnowledgeGraph",
     "MemoryStack",
     "EntityDetector",

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
@@ -48,7 +49,7 @@ class FaissCollection(BaseCollection):
         self._store.add(
             ids=ids,
             texts=documents,
-            metadatas=metadatas or [{}] * len(ids),
+            metadatas=metadatas or [{} for _ in range(len(ids))],
             embeddings=emb_array,
         )
 
@@ -66,7 +67,7 @@ class FaissCollection(BaseCollection):
         self._store.upsert(
             ids=ids,
             texts=documents,
-            metadatas=metadatas or [{}] * len(ids),
+            metadatas=metadatas or [{} for _ in range(len(ids))],
             embeddings=emb_array,
         )
 
@@ -100,7 +101,7 @@ class FaissCollection(BaseCollection):
         for q in range(qe.shape[0]):
             qv = qe[q : q + 1]
             ids, texts, dists, metadatas = self._store.search(
-                qv, n_results=n_results, where=where
+                qv, n_results=n_results, where=where, where_document=where_document
             )
             all_ids.append(ids)
             all_docs.append(texts if spec.documents else [])
@@ -162,7 +163,7 @@ class FaissCollection(BaseCollection):
 class FaissBackend(BaseBackend):
     """RFC 001 backend wrapping :class:`FaissStore`.
 
-    One ``FaissStore`` per palace; cached by ``data_dir``.
+    One ``FaissStore`` per dimension; cached by ``data_dir``.
     """
 
     name: ClassVar[str] = "faiss"
@@ -171,6 +172,7 @@ class FaissBackend(BaseBackend):
 
     def __init__(self):
         self._stores: dict[str, FaissStore] = {}
+        self._stores_lock = threading.Lock()
         self._closed = False
 
     def get_collection(
@@ -188,16 +190,17 @@ class FaissBackend(BaseBackend):
         if data_dir is None:
             data_dir = str(Path(dimension.id).expanduser().resolve() / "data")
 
-        store = self._stores.get(data_dir)
-        if store is None:
-            if not os.path.isdir(data_dir):
-                if not create:
-                    from alt_memory.backends.types import DimensionNotFoundError
+        with self._stores_lock:
+            store = self._stores.get(data_dir)
+            if store is None:
+                if not os.path.isdir(data_dir):
+                    if not create:
+                        from alt_memory.backends.types import DimensionNotFoundError
 
-                    raise DimensionNotFoundError(f"Dimension not found: {data_dir}")
-                os.makedirs(data_dir, exist_ok=True)
-            store = FaissStore(data_dir)
-            self._stores[data_dir] = store
+                        raise DimensionNotFoundError(f"Dimension not found: {data_dir}")
+                    os.makedirs(data_dir, exist_ok=True)
+                store = FaissStore(data_dir)
+                self._stores[data_dir] = store
 
         return FaissCollection(store)
 
@@ -205,34 +208,45 @@ class FaissBackend(BaseBackend):
         data_dir = dimension.local_path
         if data_dir is None:
             data_dir = str(Path(dimension.id).expanduser().resolve() / "data")
-        store = self._stores.pop(data_dir, None)
+        with self._stores_lock:
+            store = self._stores.pop(data_dir, None)
         if store:
             store.close()
 
     def close(self) -> None:
-        for store in self._stores.values():
+        with self._stores_lock:
+            stores = list(self._stores.values())
+            self._stores.clear()
+        for store in stores:
             try:
                 store.close()
             except Exception:
                 logger.exception("error closing FaissStore")
-        self._stores.clear()
         self._closed = True
 
     def health(self, dimension: Optional[DimensionRef] = None) -> HealthStatus:
-        try:
-            if dimension:
-                data_dir = dimension.local_path or str(
-                    Path(dimension.id).expanduser().resolve() / "data"
-                )
-                store = FaissStore(data_dir)
-                n = store.count()
-                store.close()
-                return HealthStatus.healthy(detail=f"FAISS {n} vectors")
+        if not dimension:
             return HealthStatus.healthy(detail="FAISS backend ready")
+        data_dir = dimension.local_path or str(
+            Path(dimension.id).expanduser().resolve() / "data"
+        )
+        with self._stores_lock:
+            store = self._stores.get(data_dir)
+        if store is None:
+            store = FaissStore(data_dir)
+            created = True
+        else:
+            created = False
+        try:
+            n = store.count()
+            return HealthStatus.healthy(detail=f"FAISS {n} vectors")
         except Exception as e:
             return HealthStatus.unhealthy(detail=str(e))
+        finally:
+            if created:
+                store.close()
 
     @classmethod
     def detect(cls, path: str) -> bool:
-        """Detect a FAISS-palace by the presence of ``data/index.faiss``."""
+        """Detect a FAISS dimension by the presence of ``data/index.faiss``."""
         return (Path(path) / "data" / "index.faiss").exists()

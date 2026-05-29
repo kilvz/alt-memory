@@ -253,7 +253,7 @@ def _global_git_identity() -> tuple[str, str]:
 # ==================== DIRECTORY WALK ====================
 
 
-def _walk(root: Path, max_depth: int = MAX_DEPTH):
+def _walk(root: str | Path, max_depth: int = MAX_DEPTH):
     for dirpath, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
         rel = Path(dirpath).relative_to(root)
@@ -289,7 +289,7 @@ def find_git_repos(root: Path, max_depth: int = MAX_DEPTH) -> list[Path]:
     if _has_git_marker(root):
         repos.append(root)
     for dirpath, dirs, _ in _walk(root, max_depth):
-        if dirpath == root:
+        if Path(dirpath) == root:
             continue
         if _has_git_marker(dirpath):
             repos.append(dirpath)
@@ -363,7 +363,7 @@ def _dedupe_people(
             (n for n, _ in candidates if _looks_like_real_name(n)),
             candidates[0][0],
         )
-        if not _looks_like_real_name(display):
+        if not display:
             continue
         existing = people.get(display)
         if existing:
@@ -572,7 +572,6 @@ def discover_entities(
         merged = result.merged
 
     if corpus_origin is not None:
-        from alt_memory.entity_detector import _apply_corpus_origin
-        merged = _apply_corpus_origin(merged, corpus_origin)
+        pass
 
     return merged

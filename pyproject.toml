@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "alt-memory"
 version = "4.3.0"
-description = "FAISS-powered memory palace — wings, rooms, drawers, hybrid search, entity graph, MCP"
+description = "Local-first AI memory system — realms, domains, entities, hybrid search, entity graph, MCP"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
@@ -17,6 +17,11 @@ dependencies = [
     "scipy>=1.10.0",
     "pyyaml>=6.0",
 ]
+
+[project.optional-dependencies]
+chroma = ["chromadb>=1.5.4,<2"]
+onnx = ["onnxruntime>=1.15.0", "huggingface_hub>=0.20.0", "transformers>=4.35.0"]
+all = ["alt-memory[chroma]", "alt-memory[onnx]"]
 
 [project.scripts]
 alt-memory = "alt_memory.cli:main"

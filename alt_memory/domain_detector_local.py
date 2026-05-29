@@ -1,6 +1,6 @@
-"""room_detector_local.py — Local setup, no API required.
+"""domain_detector_local.py — Local setup, no API required.
 
-Two ways to define rooms without calling any AI:
+Two ways to define domains without calling any AI:
   1. Auto-detect from folder structure (zero config)
   2. Define manually in .alt-memory.yaml
 """
@@ -15,7 +15,7 @@ from alt_memory.config import normalize_realm_name
 
 logger = logging.getLogger(__name__)
 
-FOLDER_ROOM_MAP = {
+FOLDER_DOMAIN_MAP = {
     "frontend": "frontend", "front-end": "frontend", "front_end": "frontend",
     "client": "frontend", "ui": "frontend", "views": "frontend", "components": "frontend",
     "pages": "frontend",
@@ -62,9 +62,9 @@ def _walk_files(project_dir: str) -> list:
     return sorted(files)
 
 
-def detect_rooms_from_folders(project_dir: str) -> list:
+def detect_domains_from_folders(project_dir: str) -> list:
     project_path = Path(project_dir).expanduser().resolve()
-    found_rooms = {}
+    found_domains = {}
 
     for item in project_path.iterdir():
         try:
@@ -73,14 +73,14 @@ def detect_rooms_from_folders(project_dir: str) -> list:
             continue
         if is_dir and item.name not in SKIP_DIRS:
             name_lower = item.name.lower().replace("-", "_")
-            if name_lower in FOLDER_ROOM_MAP:
-                room_name = FOLDER_ROOM_MAP[name_lower]
-                if room_name not in found_rooms:
-                    found_rooms[room_name] = item.name
+            if name_lower in FOLDER_DOMAIN_MAP:
+                domain_name = FOLDER_DOMAIN_MAP[name_lower]
+                if domain_name not in found_domains:
+                    found_domains[domain_name] = item.name
             elif len(item.name) > 2 and item.name[0].isalpha():
                 clean = item.name.lower().replace("-", "_").replace(" ", "_")
-                if clean not in found_rooms:
-                    found_rooms[clean] = item.name
+                if clean not in found_domains:
+                    found_domains[clean] = item.name
 
     for item in project_path.iterdir():
         try:
@@ -99,22 +99,22 @@ def detect_rooms_from_folders(project_dir: str) -> list:
                     continue
                 if subitem_is_dir and subitem.name not in SKIP_DIRS:
                     name_lower = subitem.name.lower().replace("-", "_")
-                    if name_lower in FOLDER_ROOM_MAP:
-                        room_name = FOLDER_ROOM_MAP[name_lower]
-                        if room_name not in found_rooms:
-                            found_rooms[room_name] = subitem.name
+                    if name_lower in FOLDER_DOMAIN_MAP:
+                        domain_name = FOLDER_DOMAIN_MAP[name_lower]
+                        if domain_name not in found_domains:
+                            found_domains[domain_name] = subitem.name
 
-    rooms = []
-    for room_name, original in found_rooms.items():
-        rooms.append({"name": room_name, "description": f"Files from {original}/", "keywords": [room_name, original.lower()]})
+    domains = []
+    for domain_name, original in found_domains.items():
+        domains.append({"name": domain_name, "description": f"Files from {original}/", "keywords": [domain_name, original.lower()]})
 
-    if not any(r["name"] == "general" for r in rooms):
-        rooms.append({"name": "general", "description": "Files that don't fit other rooms", "keywords": []})
+    if not any(d["name"] == "general" for d in domains):
+        domains.append({"name": "general", "description": "Files that don't fit other domains", "keywords": []})
 
-    return rooms
+    return domains
 
 
-def detect_rooms_from_files(project_dir: str) -> list:
+def detect_domains_from_files(project_dir: str) -> list:
     project_path = Path(project_dir).expanduser().resolve()
     keyword_counts = defaultdict(int)
     skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
@@ -123,73 +123,73 @@ def detect_rooms_from_files(project_dir: str) -> list:
         dirs[:] = [d for d in dirs if d not in skip_dirs]
         for filename in filenames:
             name_lower = filename.lower().replace("-", "_").replace(" ", "_")
-            for keyword, room in FOLDER_ROOM_MAP.items():
+            for keyword, domain in FOLDER_DOMAIN_MAP.items():
                 if keyword in name_lower:
-                    keyword_counts[room] += 1
+                    keyword_counts[domain] += 1
 
-    rooms = []
-    for room, count in sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True):
+    domains = []
+    for domain, count in sorted(keyword_counts.items(), key=lambda x: x[1], reverse=True):
         if count >= 2:
-            rooms.append({"name": room, "description": f"Files related to {room}", "keywords": [room]})
-        if len(rooms) >= 6:
+            domains.append({"name": domain, "description": f"Files related to {domain}", "keywords": [domain]})
+        if len(domains) >= 6:
             break
 
-    if not rooms:
-        rooms = [{"name": "general", "description": "All project files", "keywords": []}]
+    if not domains:
+        domains = [{"name": "general", "description": "All project files", "keywords": []}]
 
-    return rooms
+    return domains
 
 
-def print_proposed_structure(project_name: str, rooms: list, total_files: int, source: str):
+def print_proposed_structure(project_name: str, domains: list, total_files: int, source: str):
     print(f"\n{'=' * 55}")
     print("  Alt Memory Init — Local setup")
     print(f"{'=' * 55}")
     print(f"\n  REALM: {project_name}")
     print(f"  ({total_files} files found, domains detected from {source})\n")
-    for room in rooms:
-        print(f"    DOMAIN: {room['name']}")
-        print(f"          {room['description']}")
+    for domain in domains:
+        print(f"    DOMAIN: {domain['name']}")
+        print(f"          {domain['description']}")
     print(f"\n{'─' * 55}")
 
 
-def get_user_approval(rooms: list) -> list:
-    print("  Review the proposed rooms above.")
+def get_user_approval(domains: list) -> list:
+    print("  Review the proposed domains above.")
     print("  Options:")
-    print("    [enter]  Accept all rooms")
-    print("    [edit]   Remove or rename rooms")
-    print("    [add]    Add a room manually")
+    print("    [enter]  Accept all domains")
+    print("    [edit]   Remove or rename domains")
+    print("    [add]    Add a domain manually")
     print()
 
     choice = input("  Your choice [enter/edit/add]: ").strip().lower()
 
     if choice in ("", "y", "yes"):
-        return rooms
+        return domains
 
     if choice == "edit":
-        print("\n  Current rooms:")
-        for i, room in enumerate(rooms):
-            print(f"    {i + 1}. {room['name']} — {room['description']}")
-        remove = input("\n  Room numbers to REMOVE (comma-separated, or enter to skip): ").strip()
+        print("\n  Current domains:")
+        for i, domain in enumerate(domains):
+            print(f"    {i + 1}. {domain['name']} — {domain['description']}")
+        remove = input("\n  Domain numbers to REMOVE (comma-separated, or enter to skip): ").strip()
         if remove:
             to_remove = {int(x.strip()) - 1 for x in remove.split(",") if x.strip().isdigit()}
-            rooms = [r for i, r in enumerate(rooms) if i not in to_remove]
+            domains = [d for i, d in enumerate(domains) if i not in to_remove]
 
-    if choice == "add" or input("\n  Add any missing rooms? [y/N]: ").strip().lower() == "y":
+    if choice == "add" or input("\n  Add any missing domains? [y/N]: ").strip().lower() == "y":
         while True:
-            new_name = input("  New room name (or enter to stop): ").strip().lower().replace(" ", "_")
+            new_name = input("  New domain name (or enter to stop): ").strip().lower().replace(" ", "_")
             if not new_name:
                 break
             new_desc = input(f"  Description for '{new_name}': ").strip()
-            rooms.append({"name": new_name, "description": new_desc, "keywords": [new_name]})
+            domains.append({"name": new_name, "description": new_desc, "keywords": [new_name]})
             print(f"  Added: {new_name}")
 
-    return rooms
+    return domains
 
 
-def save_config(project_dir: str, project_name: str, rooms: list):
+def save_config(project_dir: str, project_name: str, domains: list):
     config = {
         "realm": project_name,
-        "domains": [{"name": r["name"], "description": r["description"], "keywords": r.get("keywords", [r["name"]])} for r in rooms],
+        "domains": [{"name": d["name"], "description": d["description"], "keywords": d.get("keywords", [d["name"]])} for d in domains],
     }
     config_path = Path(project_dir).expanduser().resolve() / ".alt-memory.yaml"
     tmp_path = config_path.with_suffix(".yaml.tmp")
@@ -203,7 +203,7 @@ def save_config(project_dir: str, project_name: str, rooms: list):
     print(f"\n{'=' * 55}\n")
 
 
-def detect_rooms_local(project_dir: str, yes: bool = False):
+def detect_domains_local(project_dir: str, yes: bool = False):
     project_path = Path(project_dir).expanduser().resolve()
     project_name = normalize_realm_name(project_path.name)
 
@@ -212,20 +212,20 @@ def detect_rooms_local(project_dir: str, yes: bool = False):
 
     files = _walk_files(project_dir)
 
-    rooms = detect_rooms_from_folders(project_dir)
+    domains = detect_domains_from_folders(project_dir)
     source = "folder structure"
 
-    if len(rooms) <= 1:
-        rooms = detect_rooms_from_files(project_dir)
+    if len(domains) <= 1:
+        domains = detect_domains_from_files(project_dir)
         source = "filename patterns"
 
-    if not rooms:
-        rooms = [{"name": "general", "description": "All project files", "keywords": []}]
+    if not domains:
+        domains = [{"name": "general", "description": "All project files", "keywords": []}]
         source = "fallback (flat project)"
 
-    print_proposed_structure(project_name, rooms, len(files), source)
+    print_proposed_structure(project_name, domains, len(files), source)
     if yes:
-        approved_rooms = rooms
+        approved_domains = domains
     else:
-        approved_rooms = get_user_approval(rooms)
-    save_config(project_dir, project_name, approved_rooms)
+        approved_domains = get_user_approval(domains)
+    save_config(project_dir, project_name, approved_domains)

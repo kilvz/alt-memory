@@ -49,7 +49,7 @@ from alt_memory.dynamics import (
     initialize_dynamics_fields, potentiate, apply_decay,
 )
 from alt_memory.general_extractor import extract_memories
-from alt_memory.room_detector_local import detect_rooms_local
+from alt_memory.domain_detector_local import detect_domains_local
 from alt_memory.fact_checker import check_text
 from alt_memory.onboarding import run_onboarding, quick_setup
 from alt_memory.project_scanner import (
@@ -112,7 +112,7 @@ __all__ = [
     "potentiate",
     "apply_decay",
     "extract_memories",
-    "detect_rooms_local",
+    "detect_domains_local",
     "check_text",
     "run_onboarding",
     "quick_setup",

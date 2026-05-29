@@ -21,7 +21,7 @@ def main():
 
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_init = sub.add_parser("init", help="Multi-pass initialization with entity/room detection")
+    p_init = sub.add_parser("init", help="Multi-pass initialization with entity/domain detection")
     p_init.add_argument("dir", nargs="?", default=None, help="Project directory to initialize")
     p_init.add_argument("--version", type=int, default=2)
     p_init.add_argument("--lang", default=None, help="Comma-separated language codes (e.g. en,pt-br)")
@@ -223,8 +223,8 @@ def main():
                     pass
 
                 try:
-                    from alt_memory.room_detector_local import detect_rooms_local
-                    detect_rooms_local(project_dir=project_dir, yes=True)
+                    from alt_memory.domain_detector_local import detect_domains_local
+                    detect_domains_local(project_dir=project_dir, yes=True)
                 except Exception:
                     pass
 

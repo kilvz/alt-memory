@@ -590,7 +590,7 @@ def _resolve_realm(convo_path: Path, realm: Optional[str]) -> str:
        3. Basename fallback — sanitized via ``config.normalize_realm_name``
          (lowercase, spaces/hyphens collapsed to underscores). Shared
          single source of truth with ``cmd_init``,
-         ``room_detector_local``, and ``miner.load_config`` so all
+          ``domain_detector_local``, and ``miner.load_config`` so all
          realm-slug producers stay in sync (per #1194 consolidation).
     """
     from alt_memory.config import normalize_realm_name

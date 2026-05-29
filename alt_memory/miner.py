@@ -22,6 +22,7 @@ from alt_memory.dimension import (
     MineAlreadyRunning,
     mine_dimension_lock,
     _ENTITY_STOPLIST,
+    _validate_dimension_fts5_after_mine,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,7 @@ def resolve_max_chunks_per_file(cli_value: Optional[int] = None) -> int:
     return MAX_CHUNKS_PER_FILE
 
 
-# ── Entity metadata extraction (for diary_ingest etc.) ──────────────────────
+# ── Entity metadata extraction (for record_ingest etc.) ──────────────────────
 
 _ENTITY_EXTRACT_WINDOW = 1000
 _ENTITY_METADATA_LIMIT = 50
@@ -890,6 +891,7 @@ def batch_mine(
     recursive: bool = True,
     max_chunks_per_file: Optional[int] = None,
     respect_gitignore: bool = True,
+    file_limit: Optional[int] = None,
 ) -> dict:
     base = Path(directory).resolve()
     if not base.is_dir():
@@ -936,6 +938,9 @@ def batch_mine(
                 filtered.append(fpath)
             unique = filtered
 
+    if file_limit is not None and file_limit > 0:
+        unique = unique[:file_limit]
+
     total_created = 0
 
     with mine_dimension_lock(dim_path):
@@ -961,6 +966,11 @@ def batch_mine(
 
         finally:
             _cleanup_mine_pid_file(dim_path)
+
+    try:
+        _validate_dimension_fts5_after_mine(dim_path)
+    except Exception:
+        logger.warning("Post-mine FTS5 integrity validation failed", exc_info=True)
 
     return {
         "realm": realm,

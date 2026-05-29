@@ -1,5 +1,5 @@
 """
-closet_llm.py — Generate closets via a user-configured LLM for richer indexing.
+node_llm.py — Generate nodes via a user-configured LLM for richer indexing.
 
 Optional and opt-in. Uses any OpenAI-compatible /chat/completions endpoint.
 """
@@ -16,11 +16,11 @@ from typing import Optional
 
 from alt_memory.dimension import (
     NORMALIZE_VERSION,
-    get_closets_collection,
+    get_nodes_collection,
     get_collection,
     mine_lock,
-    purge_file_closets,
-    upsert_closet_lines,
+    purge_file_nodes,
+    upsert_node_lines,
 )
 
 MAX_CONTENT_CHARS = 30000
@@ -144,7 +144,7 @@ def _call_llm(cfg: LLMConfig, source_file: str, realm: str, domain: str, content
     return None, None
 
 
-def _parsed_to_closet_lines(parsed, drawer_ids, entities_str):
+def _parsed_to_node_lines(parsed, drawer_ids, entities_str):
     lines = []
     drawer_ref = ",".join(drawer_ids[:3])
 
@@ -159,7 +159,7 @@ def _parsed_to_closet_lines(parsed, drawer_ids, entities_str):
     return lines
 
 
-def regenerate_closets(
+def regenerate_nodes(
     dim_path,
     realm=None,
     sample=0,
@@ -176,7 +176,7 @@ def regenerate_closets(
         return {"error": "missing-config", "missing": missing}
 
     entities_col = get_collection(dim_path, create=False)
-    closets_col = get_closets_collection(dim_path)
+    nodes_col = get_nodes_collection(dim_path)
 
     total = entities_col.count()
     if total == 0:
@@ -208,7 +208,7 @@ def regenerate_closets(
         sources = sources[:sample]
 
     print(
-        f"Regenerating closets for {len(sources)} source files via {cfg.endpoint} ({cfg.model})..."
+        f"Regenerating nodes for {len(sources)} source files via {cfg.endpoint} ({cfg.model})..."
     )
     if dry_run:
         print("DRY RUN — no changes will be written")
@@ -240,14 +240,14 @@ def regenerate_closets(
             total_input += usage.get("prompt_tokens", 0)
             total_output += usage.get("completion_tokens", 0)
 
-        lines = _parsed_to_closet_lines(parsed, data["drawer_ids"], entities)
-        closet_id_base = f"closet_{w}_{r}_{os.path.basename(source)[:30]}"
+        lines = _parsed_to_node_lines(parsed, data["drawer_ids"], entities)
+        node_id_base = f"node_{w}_{r}_{os.path.basename(source)[:30]}"
 
         with mine_lock(source):
-            purge_file_closets(closets_col, source)
-            upsert_closet_lines(
-                closets_col,
-                closet_id_base,
+            purge_file_nodes(nodes_col, source)
+            upsert_node_lines(
+                nodes_col,
+                node_id_base,
                 lines,
                 {
                     "realm": w,
@@ -280,7 +280,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Regenerate closets via a user-configured LLM (OpenAI-compatible API)"
+        description="Regenerate nodes via a user-configured LLM (OpenAI-compatible API)"
     )
     parser.add_argument(
         "--dimension",
@@ -308,6 +308,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     cfg = LLMConfig(endpoint=args.endpoint, key=args.key, model=args.model)
-    regenerate_closets(
+    regenerate_nodes(
         args.dimension, realm=args.realm, sample=args.sample, dry_run=args.dry_run, cfg=cfg
     )

@@ -1,4 +1,4 @@
-"""Alt Memory v4 — FAISS-powered dimension with realms, domains, entities, hybrid search, entity graph, closets."""
+"""Alt Memory v4 — FAISS-powered dimension with realms, domains, entities, hybrid search, entity graph, nodes."""
 
 import contextlib
 import json
@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 # Closet infrastructure constants
 NORMALIZE_VERSION = 2
-CLOSET_CHAR_LIMIT = 2000
-CLOSET_EXTRACT_WINDOW = 5000
+NODE_CHAR_LIMIT = 2000
+NODE_EXTRACT_WINDOW = 5000
 
 # Files/dirs to skip during directory walks
 SKIP_DIRS = frozenset({".git", "__pycache__", "node_modules", ".venv", "venv", ".opencode", ".claude"})
@@ -245,13 +245,15 @@ def _validate_dimension_fts5_after_mine(dim_path: str) -> None:
 
 
 def bulk_check_mined(dim_path: str) -> dict[str, float]:
-    """Return dict mapping source_file -> source_mtime for all entities."""
+    """Return dict mapping source_file -> source_mtime for all entities at current normalize_version."""
     base = Path(dim_path).expanduser().resolve()
     conn = sqlite3.connect(str(base / "dimension.db"))
     try:
         rows = conn.execute(
             "SELECT DISTINCT source_file, json_extract(metadata, '$.source_mtime') as mtime "
-            "FROM entities WHERE source_file != '' AND source_file IS NOT NULL"
+            "FROM entities WHERE source_file != '' AND source_file IS NOT NULL "
+            "AND json_extract(metadata, '$.normalize_version') = ?",
+            (NORMALIZE_VERSION,),
         ).fetchall()
         return {row[0]: float(row[1]) for row in rows if row[1] is not None}
     except (sqlite3.Error, ValueError, TypeError):
@@ -260,16 +262,30 @@ def bulk_check_mined(dim_path: str) -> dict[str, float]:
         conn.close()
 
 
-def prefetch_mined_set(dim_path: str) -> set[str]:
-    """Return set of source_file paths already mined at current normalize_version."""
+def prefetch_mined_set(dim_path: str, extract_mode: Optional[str] = None) -> set[str]:
+    """Return set of source_file paths already mined at current normalize_version.
+
+    When ``extract_mode`` is set, only files with matching mode are returned.
+    """
     base = Path(dim_path).expanduser().resolve()
     conn = sqlite3.connect(str(base / "dimension.db"))
     try:
         rows = conn.execute(
-            "SELECT source_file FROM entities WHERE source_file != '' AND source_file IS NOT NULL"
+            "SELECT source_file, metadata FROM nodes WHERE source_file != '' AND source_file IS NOT NULL"
         ).fetchall()
-        return {row[0] for row in rows}
-    except sqlite3.Error:
+        result: set[str] = set()
+        for source_file, meta_json in rows:
+            if not source_file:
+                continue
+            meta = json.loads(meta_json or "{}")
+            stored_version = meta.get("normalize_version", 1)
+            if stored_version < NORMALIZE_VERSION:
+                continue
+            if extract_mode is not None and not _metadata_matches_extract_mode(meta, extract_mode):
+                continue
+            result.add(source_file)
+        return result
+    except (sqlite3.Error, json.JSONDecodeError):
         return set()
     finally:
         conn.close()
@@ -398,12 +414,12 @@ class Dimension:
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_entities_realm_domain ON entities(realm, domain)")
         self._db.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(content, id)")
-        self._db.execute("""CREATE TABLE IF NOT EXISTS closets (
+        self._db.execute("""CREATE TABLE IF NOT EXISTS nodes (
                 id TEXT PRIMARY KEY, content TEXT NOT NULL,
                 metadata TEXT DEFAULT '{}',
                 source_file TEXT DEFAULT '', realm TEXT DEFAULT '', domain TEXT DEFAULT '',
                 created_at TEXT DEFAULT (datetime('now')))""")
-        self._db.execute("CREATE INDEX IF NOT EXISTS idx_closets_source ON closets(source_file)")
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_nodes_source ON nodes(source_file)")
         self._db.commit()
 
         self._store = self._create_store()
@@ -841,28 +857,85 @@ class Dimension:
             max_distance=max_distance,
         )
 
-        # Closet boost
+        # Node boost — tiered by node reference count
         source_files = set()
         for h in hits:
             src = h.get("_source_file_full") or h.get("metadata", {}).get("source_file")
             if src:
                 source_files.add(src)
-        boosted_ids = self._get_closet_source_ids(source_files) if source_files else set()
+        boosted = self._get_node_source_boosts(source_files) if source_files else {}
 
-        BOOST_VALUES = [0.40, 0.25, 0.15, 0.08, 0.04]
-        if boosted_ids:
+        if boosted:
             for h in hits:
-                if h.get("id") in boosted_ids:
-                    h["closet_boost"] = BOOST_VALUES[0]
+                eid = h.get("id")
+                if eid in boosted:
+                    h["node_boost"] = boosted[eid]
+
+        # Node preview — show matching node content for boosted results
+        node_preview_map: dict[str, str] = {}
+        if source_files:
+            placeholders = ",".join("?" * len(source_files))
+            node_rows = self._db_execute(
+                f"SELECT id, content, source_file FROM nodes WHERE source_file IN ({placeholders}) LIMIT 100",
+                list(source_files),
+            ).fetchall()
+            for cid, ccontent, csrc in node_rows:
+                key = csrc
+                if key not in node_preview_map and ccontent.strip():
+                    node_preview_map[key] = ccontent[:200]
+
+        # Drawer-grep hydration — for boosted entities, find the best keyword-matching
+        # chunk from the same source file and expand with neighbor context.
+        hydrated_source_files: set[str] = set()
+        for h in hits:
+            if h.get("node_boost", 0) > 0:
+                src = h.get("_source_file_full") or h.get("metadata", {}).get("source_file", "")
+                if src:
+                    hydrated_source_files.add(src)
+        if hydrated_source_files:
+            from alt_memory.searcher import _tokenize
+            query_tokens = _tokenize(query)
+            for src in hydrated_source_files:
+                neighbor_rows = self._db_execute(
+                    "SELECT id, content, metadata FROM entities WHERE source_file = ? ORDER BY created_at",
+                    (src,),
+                ).fetchall()
+                if len(neighbor_rows) <= 1:
+                    continue
+                scored: list[tuple[int, str, int]] = []
+                for nid, ncontent, nmeta_json in neighbor_rows:
+                    nmeta = json.loads(nmeta_json or "{}")
+                    nchunk = nmeta.get("chunk_index", 0)
+                    ntok = _tokenize(ncontent)
+                    score = sum(1 for t in query_tokens if t in ntok)
+                    scored.append((score, ncontent, nchunk))
+                scored.sort(key=lambda x: -x[0])
+                if scored and scored[0][0] > 0:
+                    best_score, best_text, best_chunk = scored[0]
+                    neighbors: list[str] = [best_text]
+                    for score, ntext, nchunk in scored:
+                        if abs(nchunk - best_chunk) == 1:
+                            neighbors.append(ntext)
+                    hydrated = "\n\n---\n\n".join(neighbors)
+                    for h in hits:
+                        hsrc = h.get("_source_file_full") or h.get("metadata", {}).get("source_file", "")
+                        if hsrc == src:
+                            h["hydrated_text"] = hydrated
 
         # BM25 hybrid re-rank
         hits = _hybrid_rank(hits, query)[:n_results]
+
+        # Attach node_preview to results
+        for h in hits:
+            src = h.get("_source_file_full") or h.get("metadata", {}).get("source_file", "")
+            if src in node_preview_map:
+                h["node_preview"] = node_preview_map[src]
 
         # Clean internal fields
         for h in hits:
             h.pop("_source_file_full", None)
             h.pop("_chunk_index", None)
-            h.setdefault("closet_boost", 0.0)
+            h.setdefault("node_boost", 0.0)
 
         return {
             "query": query,
@@ -968,34 +1041,57 @@ class Dimension:
 
         combined.sort(key=lambda x: -x.distance)
 
-        # Closet boost: if any entity's source_file is referenced in the
-        # closets table, boost its rank by 0.15.
+        # Node boost — tiered by node reference count
         source_files = set()
         for r in combined:
             src = r.metadata.get("source_file") if r.metadata else None
             if src:
                 source_files.add(src)
         if source_files:
-            boosted_ids = self._get_closet_source_ids(source_files)
-            if boosted_ids:
+            boosted = self._get_node_source_boosts(source_files)
+            if boosted:
                 for i, r in enumerate(combined):
-                    if r.id in boosted_ids:
+                    boost_val = boosted.get(r.id, 0.0)
+                    if boost_val > 0:
                         combined[i] = SearchResult(
                             id=r.id, text=r.text,
-                            distance=r.distance + 0.15,
+                            distance=r.distance + boost_val,
                             metadata=r.metadata, realm=r.realm, domain=r.domain,
                         )
 
         combined.sort(key=lambda x: -x.distance)
         return combined[:n_results]
 
-    def _get_closet_source_ids(self, source_files: set[str]) -> set[str]:
-        """Return entity IDs whose source_file is referenced in closets."""
+    NODE_RANK_BOOSTS = [0.40, 0.25, 0.15, 0.08, 0.04]
+
+    def _get_node_source_boosts(self, source_files: set[str]) -> dict[str, float]:
+        """Return dict mapping entity_id -> boost_value based on node reference count rank.
+
+        Entities from source_files with more node references get higher
+        boosts. Up to 5 tiers, then a flat floor of the last value.
+        """
+        if not source_files:
+            return {}
+        placeholders = ",".join("?" * len(source_files))
+        rows = self._db_execute(
+            f"SELECT e.id, COUNT(c.id) as ref_count FROM entities e "
+            f"INNER JOIN nodes c ON c.source_file = e.source_file "
+            f"WHERE c.source_file IN ({placeholders}) "
+            f"GROUP BY e.id ORDER BY ref_count DESC",
+            list(source_files),
+        ).fetchall()
+        boosts: dict[str, float] = {}
+        for rank, (eid, _) in enumerate(rows):
+            boosts[eid] = self.NODE_RANK_BOOSTS[rank] if rank < len(self.NODE_RANK_BOOSTS) else self.NODE_RANK_BOOSTS[-1]
+        return boosts
+
+    def _get_node_source_ids(self, source_files: set[str]) -> set[str]:
+        """Return entity IDs whose source_file is referenced in nodes."""
         if not source_files:
             return set()
         placeholders = ",".join("?" * len(source_files))
         rows = self._db_execute(
-            f"SELECT DISTINCT e.id FROM entities e INNER JOIN closets c ON c.source_file = e.source_file "
+            f"SELECT DISTINCT e.id FROM entities e INNER JOIN nodes c ON c.source_file = e.source_file "
             f"WHERE c.source_file IN ({placeholders})",
             list(source_files),
         ).fetchall()
@@ -1069,18 +1165,18 @@ class Dimension:
         result["message"] = f"Dimension healthy: {count} entities, {vec_count} vectors"
         return result
 
-    # -- Agent diary --
+    # -- Agent record --
 
-    def diary_write(self, agent_name: str, entry: str, topic: str = "general",
+    def record_write(self, agent_name: str, entry: str, topic: str = "general",
                     realm: str = "") -> str:
         target_realm = realm or f"agent_{_sanitize(agent_name)}"
-        self.add_entity(realm=target_realm, domain="diary", content=entry,
-                        metadata={"agent": agent_name, "topic": topic, "type": "diary"})
+        self.add_entity(realm=target_realm, domain="record", content=entry,
+                        metadata={"agent": agent_name, "topic": topic, "type": "record"})
         return target_realm
 
-    def diary_read(self, agent_name: str, last_n: int = 10, realm: str = "") -> list[dict]:
+    def record_read(self, agent_name: str, last_n: int = 10, realm: str = "") -> list[dict]:
         target_realm = realm or f"agent_{_sanitize(agent_name)}"
-        return self.list_entities(realm=target_realm, domain="diary", limit=last_n)
+        return self.list_entities(realm=target_realm, domain="record", limit=last_n)
 
     # -- Duplicate check --
 
@@ -1278,7 +1374,7 @@ class Dimension:
         }
 
 
-# ==================== Closet-line entity extraction (for diary_ingest) ====================
+# ==================== Closet-line entity extraction (for record_ingest) ====================
 
 
 def _candidate_entity_words(text: str) -> list[str]:
@@ -1339,20 +1435,20 @@ def _build_date_line_segment(text: str) -> str:
     return "\n".join(clean)
 
 
-def build_closet_lines(
+def build_node_lines(
     text: str,
     existing: dict[str, str],
     source_line: Optional[str] = None,
     drawer_ids: Optional[list[str]] = None,
 ) -> list[dict]:
-    """Build closet-line entries from text, grouping named-entity snippets.
+    """Build node-line entries from text, grouping named-entity snippets.
 
     Parameters
     ----------
     text : str
         Source text to mine.
     existing : dict[str, str]
-        Existing closet lines keyed by entity name — maps to their current
+        Existing node lines keyed by entity name — maps to their current
         accumulated content.
     source_line : str, optional
         Optional source-file line for provenance.
@@ -1371,12 +1467,12 @@ def build_closet_lines(
     # If no entities found, fall back to "_meta" with collapsed dates.
     if not entities:
         collapsed = _build_date_line_segment(text)
-        if len(collapsed) > CLOSET_CHAR_LIMIT:
-            collapsed = collapsed[:CLOSET_CHAR_LIMIT]
+        if len(collapsed) > NODE_CHAR_LIMIT:
+            collapsed = collapsed[:NODE_CHAR_LIMIT]
         existing_meta = existing.get("_meta", "")
         merged = existing_meta + "\n" + collapsed if existing_meta else collapsed
-        if len(merged) > CLOSET_CHAR_LIMIT:
-            merged = merged[-CLOSET_CHAR_LIMIT:]
+        if len(merged) > NODE_CHAR_LIMIT:
+            merged = merged[-NODE_CHAR_LIMIT:]
         return [{"entity": "_meta", "content": merged.strip()}]
 
     result: list[dict] = []
@@ -1387,32 +1483,32 @@ def build_closet_lines(
         seen_entities.add(e)
         match = re.search(r'\b' + re.escape(e) + r'\b', text, re.IGNORECASE)
         pos = match.start() if match else text.lower().find(e.lower())
-        window_start = max(0, pos - CLOSET_EXTRACT_WINDOW)
-        window_end = min(len(text), window_start + 2 * CLOSET_EXTRACT_WINDOW + len(e))
+        window_start = max(0, pos - NODE_EXTRACT_WINDOW)
+        window_end = min(len(text), window_start + 2 * NODE_EXTRACT_WINDOW + len(e))
         snippet = text[window_start:window_end].strip()
-        if len(snippet) > CLOSET_CHAR_LIMIT:
-            snippet = snippet[:CLOSET_CHAR_LIMIT]
+        if len(snippet) > NODE_CHAR_LIMIT:
+            snippet = snippet[:NODE_CHAR_LIMIT]
         existing_content = existing.get(e, "")
         merged = existing_content + "\n" + snippet if existing_content else snippet
-        if len(merged) > CLOSET_CHAR_LIMIT:
-            merged = merged[-CLOSET_CHAR_LIMIT:]
+        if len(merged) > NODE_CHAR_LIMIT:
+            merged = merged[-NODE_CHAR_LIMIT:]
         result.append({"entity": e, "content": merged.strip()})
     return result
 
 
-# ==================== Standalone collection helpers (for closet_llm etc.) ====================
+# ==================== Standalone collection helpers (for node_llm etc.) ====================
 
 
 def _open_dimension_db(dim_path: str) -> sqlite3.Connection:
     base = Path(dim_path).expanduser().resolve()
     conn = sqlite3.connect(str(base / "dimension.db"), check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("""CREATE TABLE IF NOT EXISTS closets (
+    conn.execute("""CREATE TABLE IF NOT EXISTS nodes (
             id TEXT PRIMARY KEY, content TEXT NOT NULL,
             metadata TEXT DEFAULT '{}',
             source_file TEXT DEFAULT '', realm TEXT DEFAULT '', domain TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now')))""")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_closets_source ON closets(source_file)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_nodes_source ON nodes(source_file)")
     conn.commit()
     return conn
 
@@ -1440,15 +1536,15 @@ class _EntityCollection:
         }
 
 
-class _ClosetCollection:
-    """Minimal ChromaDB-compatible wrapper around the closets SQLite table."""
+class _NodeCollection:
+    """Minimal ChromaDB-compatible wrapper around the nodes SQLite table."""
 
     def __init__(self, conn: sqlite3.Connection):
         self._conn = conn
 
     def delete(self, where: Optional[dict] = None) -> None:
         if where and "source_file" in where:
-            self._conn.execute("DELETE FROM closets WHERE source_file = ?", (where["source_file"],))
+            self._conn.execute("DELETE FROM nodes WHERE source_file = ?", (where["source_file"],))
             self._conn.commit()
 
     def upsert(self, documents: list[str], ids: list[str], metadatas: Optional[list[dict]] = None) -> None:
@@ -1456,7 +1552,7 @@ class _ClosetCollection:
             metadatas = [{} for _ in range(len(documents))]
         for doc, cid, meta in zip(documents, ids, metadatas):
             self._conn.execute(
-                "INSERT OR REPLACE INTO closets (id, content, metadata, source_file, realm, domain) "
+                "INSERT OR REPLACE INTO nodes (id, content, metadata, source_file, realm, domain) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     cid,
@@ -1480,13 +1576,36 @@ def get_collection(
     return _EntityCollection(conn)
 
 
-def get_closets_collection(dim_path: str, create: bool = True) -> _ClosetCollection:
+def get_nodes_collection(dim_path: str, create: bool = True) -> _NodeCollection:
     conn = _open_dimension_db(dim_path)
-    return _ClosetCollection(conn)
+    return _NodeCollection(conn)
 
 
-def file_already_mined(db_or_conn, source_file: str, check_mtime: bool = False) -> bool:
-    """Check if a source file has already been mined (has sentinel or closets rows).
+def _metadata_matches_extract_mode(meta: dict, extract_mode: Optional[str]) -> bool:
+    if extract_mode is None:
+        return True
+    stored_mode = meta.get("extract_mode")
+    return stored_mode == extract_mode or (extract_mode == "exchange" and stored_mode is None)
+
+
+def file_already_mined(
+    db_or_conn,
+    source_file: str,
+    check_mtime: bool = False,
+    extract_mode: Optional[str] = None,
+) -> bool:
+    """Check if a source file has already been mined.
+
+    Returns False (so the file gets re-mined) when:
+      - no nodes exist for this source_file
+      - the stored ``normalize_version`` is missing or older than the current
+        schema (triggers silent rebuild after a normalization upgrade)
+      - ``check_mtime=True`` and the file's mtime differs from the stored one
+
+    When ``extract_mode`` is set, idempotency is scoped to that extraction
+    mode so exchange-mode and general-mode drawers can coexist for the same
+    source transcript. Legacy drawers without extract_mode are treated as
+    exchange-mode drawers.
 
     Parameters
     ----------
@@ -1495,8 +1614,9 @@ def file_already_mined(db_or_conn, source_file: str, check_mtime: bool = False) 
     source_file :
         File path to check.
     check_mtime :
-        If True, also re-mine if the source file's mtime has changed (i.e. the file
-        was updated after the last mine).
+        If True, also re-mine if the source file's mtime has changed.
+    extract_mode :
+        Optional mode scope for extraction mode idempotency.
     """
     try:
         if hasattr(db_or_conn, "_db"):
@@ -1504,57 +1624,64 @@ def file_already_mined(db_or_conn, source_file: str, check_mtime: bool = False) 
         else:
             conn = db_or_conn
         rows = conn.execute(
-            "SELECT metadata FROM closets WHERE source_file = ? LIMIT 1",
+            "SELECT metadata FROM nodes WHERE source_file = ?",
             (source_file,),
         ).fetchall()
         if not rows:
             return False
-        if check_mtime:
+        for (meta_json,) in rows:
+            meta = json.loads(meta_json or "{}")
+            if extract_mode is not None and not _metadata_matches_extract_mode(meta, extract_mode):
+                continue
+            stored_version = meta.get("normalize_version", 1)
+            if stored_version < NORMALIZE_VERSION:
+                continue
+            if not check_mtime:
+                return True
             try:
                 current_mtime = os.path.getmtime(source_file)
             except OSError:
                 return True
-            meta = json.loads(rows[0][0] or "{}")
             stored_mtime = meta.get("source_mtime")
-            if stored_mtime is not None and current_mtime > stored_mtime:
-                return False
-        return True
+            if stored_mtime is not None and abs(float(stored_mtime) - current_mtime) < 0.001:
+                return True
+        return False
     except (sqlite3.Error, ValueError, json.JSONDecodeError):
         return False
 
 
-def purge_file_closets(closets_col, source_file: str) -> int:
+def purge_file_nodes(nodes_col, source_file: str) -> int:
     try:
-        result = closets_col.delete(where={"source_file": source_file})
+        result = nodes_col.delete(where={"source_file": source_file})
         return len(result[0]) if result and result[0] else 0
     except Exception:
         logger.debug("Closet purge failed for %s", source_file, exc_info=True)
         return 0
 
 
-def upsert_closet_lines(closets_col, closet_id_base, lines, metadata):
-    closet_num = 1
+def upsert_node_lines(nodes_col, node_id_base, lines, metadata):
+    node_num = 1
     current_lines: list = []
     current_chars = 0
-    closets_written = 0
+    nodes_written = 0
 
     def _flush():
-        nonlocal closets_written
+        nonlocal nodes_written
         if not current_lines:
             return
-        closet_id = f"{closet_id_base}_{closet_num:02d}"
+        node_id = f"{node_id_base}_{node_num:02d}"
         text = "\n".join(current_lines)
-        closets_col.upsert(documents=[text], ids=[closet_id], metadatas=[metadata])
-        closets_written += 1
+        nodes_col.upsert(documents=[text], ids=[node_id], metadatas=[metadata])
+        nodes_written += 1
 
     for line in lines:
         line_len = len(line)
-        if current_chars > 0 and current_chars + line_len + 1 > CLOSET_CHAR_LIMIT:
+        if current_chars > 0 and current_chars + line_len + 1 > NODE_CHAR_LIMIT:
             _flush()
-            closet_num += 1
+            node_num += 1
             current_lines = []
             current_chars = 0
         current_lines.append(line)
         current_chars += line_len + 1
     _flush()
-    return closets_written
+    return nodes_written

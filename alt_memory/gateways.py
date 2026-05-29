@@ -1,20 +1,20 @@
-"""Hallways — within-realm entity-to-entity connectors.
+"""Gateways — within-realm entity-to-entity connectors.
 
-A **hallway** is a connection between two entities (people, projects,
+A **gateway** is a connection between two entities (people, projects,
 concepts, interests) inside one realm, materialized from their
 co-occurrence across that realm's entities. Conceptually:
 
     REALM -> has ENTITIES (each tagged with entities)
              entities -> connected to other entities by HALLWAYS
                         (within-realm, built from entity co-occurrence)
-                        hallways -> are the primitive
-                                    tunnels -> use hallways to spawn
+                        gateways -> are the primitive
+                                    tunnels -> use gateways to spawn
                                               cross-realm connections
 
-If Aya and Lumi are both mentioned in 47 entities across the diary,
-letters, and ideas domains, there's a hallway between them. If Aya
-and "consciousness" co-occur in 19 entities, there's a hallway between
-them too. The hallway *is* the structural fact of "these two entities
+If Aya and Lumi are both mentioned in 47 entities across the record,
+letters, and ideas domains, there's a gateway between them. If Aya
+and "consciousness" co-occur in 19 entities, there's a gateway between
+them too. The gateway *is* the structural fact of "these two entities
 travel together inside this realm."
 
 FAISS/SQLite (alt-memory).
@@ -42,61 +42,61 @@ from alt_memory.config import AltMemoryConfig
 from alt_memory.dynamics import initialize_dynamics_fields
 from alt_memory.dimension import Dimension
 
-logger = logging.getLogger("alt_memory_hallways")
+logger = logging.getLogger("alt_memory_gateways")
 
 # Derived from AltMemoryConfig so it respects the configured dim_path.
-def _hallway_file() -> str:
-    return AltMemoryConfig().hallway_file
+def _gateway_file() -> str:
+    return AltMemoryConfig().gateway_file
 
 _SCHEMA_VERSION = 1
 
-_hallway_lock = threading.Lock()
+_gateway_lock = threading.Lock()
 
 
 __all__ = [
-    "compute_hallways_for_realm",
-    "list_hallways",
-    "delete_hallway",
+    "compute_gateways_for_realm",
+    "list_gateways",
+    "delete_gateway",
 ]
 
 
 # --------------------------------------------------------------------------
-# Persistence — JSON file at _hallway_file(), restricted perms (0600) on POSIX
+# Persistence — JSON file at _gateway_file(), restricted perms (0600) on POSIX
 # --------------------------------------------------------------------------
 
 
-def _load_hallways() -> list[dict]:
-    """Read all hallway records. Returns ``[]`` if the file is missing or corrupt."""
-    if not os.path.exists(_hallway_file()):
+def _load_gateways() -> list[dict]:
+    """Read all gateway records. Returns ``[]`` if the file is missing or corrupt."""
+    if not os.path.exists(_gateway_file()):
         return []
     try:
-        with open(_hallway_file(), encoding="utf-8") as f:
+        with open(_gateway_file(), encoding="utf-8") as f:
             raw = json.load(f)
     except (OSError, json.JSONDecodeError):
-        logger.debug("hallways: load failed, treating as empty", exc_info=True)
+        logger.debug("gateways: load failed, treating as empty", exc_info=True)
         return []
-    if isinstance(raw, dict) and "hallways" in raw:
-        return raw.get("hallways") or []
+    if isinstance(raw, dict) and "gateways" in raw:
+        return raw.get("gateways") or []
     if isinstance(raw, list):
         return raw
     return []
 
 
-def _save_hallways(hallways: list[dict]) -> None:
-    """Atomically persist hallway records to _hallway_file().
+def _save_gateways(gateways: list[dict]) -> None:
+    """Atomically persist gateway records to _gateway_file().
 
     Uses an os.replace temp-file dance so a crash mid-write doesn't
     corrupt the file. POSIX permission is restricted to 0600 because
-    hallways reveal within-realm entity connections that the user may
+    gateways reveal within-realm entity connections that the user may
     not want world-readable.
     """
-    directory = os.path.dirname(_hallway_file())
+    directory = os.path.dirname(_gateway_file())
     os.makedirs(directory, exist_ok=True)
     payload = {
         "schema_version": _SCHEMA_VERSION,
-        "hallways": list(hallways),
+        "gateways": list(gateways),
     }
-    fd, tmp_path = tempfile.mkstemp(prefix=".hallways-", suffix=".tmp", dir=directory)
+    fd, tmp_path = tempfile.mkstemp(prefix=".gateways-", suffix=".tmp", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -105,7 +105,7 @@ def _save_hallways(hallways: list[dict]) -> None:
         except OSError:
             # Non-POSIX systems may not support chmod; not fatal.
             pass
-        os.replace(tmp_path, _hallway_file())
+        os.replace(tmp_path, _gateway_file())
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -115,7 +115,7 @@ def _save_hallways(hallways: list[dict]) -> None:
 
 
 # --------------------------------------------------------------------------
-# Core algorithm — compute entity-pair hallways for one realm
+# Core algorithm — compute entity-pair gateways for one realm
 # --------------------------------------------------------------------------
 
 
@@ -144,25 +144,25 @@ def _parse_entities(value) -> list[str]:
     return result
 
 
-def _hallway_id(realm: str, entity_a: str, entity_b: str) -> str:
+def _gateway_id(realm: str, entity_a: str, entity_b: str) -> str:
     """Deterministic id derived from realm + sorted entity pair.
 
     Sorting before hashing makes the id symmetric — (Aya, Lumi) and
     (Lumi, Aya) produce the same record. So an idempotent re-mine
-    upserts the same hallway instead of creating two parallel records.
+    upserts the same gateway instead of creating two parallel records.
     """
     a, b = sorted([entity_a, entity_b])
     key = f"{realm}::{a}::{b}".encode("utf-8")
     suffix = hashlib.sha256(key).hexdigest()[:8]
-    return f"hallway_{realm}_{a}_{b}_{suffix}"
+    return f"gateway_{realm}_{a}_{b}_{suffix}"
 
 
-def compute_hallways_for_realm(
+def compute_gateways_for_realm(
     realm: str,
     dim_path: str = "~/.alt-memory",
     min_count: int = 2,
 ) -> list[dict]:
-    """Compute entity-pair hallways for one realm.
+    """Compute entity-pair gateways for one realm.
 
     Algorithm:
       1. Open the dimension at ``dim_path`` and query entities for ``realm``
@@ -171,10 +171,10 @@ def compute_hallways_for_realm(
          that entity is one co-occurrence. Increment a counter for each
          pair; also record the domain the entity lives in.
       3. For each (entity_a, entity_b) pair whose co-occurrence count is
-         ``>= min_count``, materialize a hallway record. The record
+         ``>= min_count``, materialize a gateway record. The record
           carries the pair, the count, and the set of domains where they
          co-occurred (useful context for navigation).
-      4. Persist the full hallway list (records for other realms preserved,
+      4. Persist the full gateway list (records for other realms preserved,
          this realm's records replaced) and return the just-computed list.
 
     Args:
@@ -182,12 +182,12 @@ def compute_hallways_for_realm(
         dim_path: path to the alt-memory data directory. Defaults to
             ``~/.alt-memory``.
         min_count: minimum co-occurrence count required to materialize a
-            hallway between two entities. Default 2 — single co-occurrences
+            gateway between two entities. Default 2 — single co-occurrences
             are noise (entities mentioned together once in one entity);
             two or more is a real signal. Clamped to ``>=1``.
 
     Returns:
-        List of hallway dicts created for this realm. Records for other
+        List of gateway dicts created for this realm. Records for other
         realms already on disk are preserved.
     """
     min_count = max(1, int(min_count))
@@ -208,7 +208,7 @@ def compute_hallways_for_realm(
                 conn.close()
     except Exception:
         logger.warning(
-            "compute_hallways_for_realm: query failed for %s", realm, exc_info=True
+            "compute_gateways_for_realm: query failed for %s", realm, exc_info=True
         )
         return []
 
@@ -252,20 +252,20 @@ def compute_hallways_for_realm(
     if not pair_counts:
         return []
 
-    # 3. Materialize hallway records for pairs above the threshold.
+    # 3. Materialize gateway records for pairs above the threshold.
     #    Before building, load existing records so we can PRESERVE
     #    dynamics fields (strength, stability, last_activated, access_count)
     #    across recomputes. Without this preservation, every mine wipes
     #    the connection weights accumulated through use — defeating the
     #    living-connection layer entirely.
-    with _hallway_lock:
-        existing = _load_hallways()
+    with _gateway_lock:
+        existing = _load_gateways()
         existing_dynamics_lookup: dict = {}
         for h in existing:
             if h.get("realm") != realm:
                 continue
             # Canonicalize the lookup key by sorting the entity pair — must
-            # match the symmetric ID generation in _hallway_id (which also
+            # match the symmetric ID generation in _gateway_id (which also
             # sorts). Without this, a persisted record with reversed entity
             # order would silently miss the lookup and lose its accumulated
             # dynamics on every recompute.
@@ -288,7 +288,7 @@ def compute_hallways_for_realm(
             if len(rooms) > 3:
                 room_summary += f", +{len(rooms) - 3} more"
             record = {
-                "id": _hallway_id(realm, entity_a, entity_b),
+                "id": _gateway_id(realm, entity_a, entity_b),
                 "realm": realm,
                 "entity_a": entity_a,
                 "entity_b": entity_b,
@@ -307,31 +307,31 @@ def compute_hallways_for_realm(
 
         # 4. Persist — preserve other-realm records, replace this realm's records.
         preserved_other_realms = [h for h in existing if h.get("realm") != realm]
-        _save_hallways(preserved_other_realms + created)
+        _save_gateways(preserved_other_realms + created)
 
     return created
 
 
 # --------------------------------------------------------------------------
-# Query API — list_hallways, delete_hallway
+# Query API — list_gateways, delete_gateway
 # --------------------------------------------------------------------------
 
 
-def list_hallways(realm: Optional[str] = None) -> list[dict]:
-    """List hallway records. Filter by ``realm`` if specified."""
-    with _hallway_lock:
-        all_hallways = _load_hallways()
+def list_gateways(realm: Optional[str] = None) -> list[dict]:
+    """List gateway records. Filter by ``realm`` if specified."""
+    with _gateway_lock:
+        all_gateways = _load_gateways()
         if realm is None:
-            return list(all_hallways)
-        return [h for h in all_hallways if h.get("realm") == realm]
+            return list(all_gateways)
+        return [h for h in all_gateways if h.get("realm") == realm]
 
 
-def delete_hallway(hallway_id: str) -> bool:
-    """Remove one hallway record by id. Returns True if a record was removed."""
-    with _hallway_lock:
-        hallways = _load_hallways()
-        filtered = [h for h in hallways if h.get("id") != hallway_id]
-        if len(filtered) == len(hallways):
+def delete_gateway(gateway_id: str) -> bool:
+    """Remove one gateway record by id. Returns True if a record was removed."""
+    with _gateway_lock:
+        gateways = _load_gateways()
+        filtered = [h for h in gateways if h.get("id") != gateway_id]
+        if len(filtered) == len(gateways):
             return False
-        _save_hallways(filtered)
+        _save_gateways(filtered)
         return True

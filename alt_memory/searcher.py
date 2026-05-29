@@ -1,4 +1,4 @@
-"""Search utilities — BM25 ranking, closet helpers, virtual line numbering.
+"""Search utilities — BM25 ranking, node helpers, virtual line numbering.
 
 The primary search entry point is ``Dimension.search()`` in ``dimension.py``.
 This module provides pure-function helpers for re-ranking and display.
@@ -13,7 +13,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 _TOKEN_RE = re.compile(r"\w{2,}", re.UNICODE)
-_CLOSET_ENTITY_REF_RE = re.compile(r"→([\w,]+)")
+_NODE_ENTITY_REF_RE = re.compile(r"→([\w,]+)")
 
 
 def _tokenize(text: str) -> list[str]:
@@ -90,9 +90,9 @@ def _hybrid_rank(
     return [r for _, r in scored]
 
 
-def _extract_entity_ids_from_closet(closet_doc: str) -> list[str]:
+def _extract_entity_ids_from_node(node_doc: str) -> list[str]:
     seen = {}
-    for match in _CLOSET_ENTITY_REF_RE.findall(closet_doc):
+    for match in _NODE_ENTITY_REF_RE.findall(node_doc):
         for did in match.split(","):
             did = did.strip()
             if did and did not in seen:

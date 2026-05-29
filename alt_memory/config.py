@@ -109,7 +109,7 @@ DEFAULT_TOPIC_REALMS = [
     "creative",
 ]
 
-DEFAULT_HALL_KEYWORDS = {
+DEFAULT_GATE_KEYWORDS = {
     "emotions": [
         "scared", "afraid", "worried", "happy", "sad",
         "love", "hate", "feel", "cry", "tears",
@@ -167,16 +167,16 @@ class AltMemoryConfig:
         return os.path.join(self.dim_path, "tunnels.json")
 
     @property
-    def hallway_file(self):
-        return os.path.join(self.dim_path, "hallways.json")
+    def gateway_file(self):
+        return os.path.join(self.dim_path, "gateways.json")
 
     @property
     def topic_realms(self):
         return self._file_config.get("topic_realms", DEFAULT_TOPIC_REALMS)
 
     @property
-    def hall_keywords(self):
-        return self._file_config.get("hall_keywords", DEFAULT_HALL_KEYWORDS)
+    def gate_keywords(self):
+        return self._file_config.get("gate_keywords", DEFAULT_GATE_KEYWORDS)
 
     @staticmethod
     def _try_coerce_int(value, minimum=None):
@@ -394,7 +394,7 @@ class AltMemoryConfig:
             default_config = {
                 "dim_path": DEFAULT_DIM_PATH,
                 "topic_realms": DEFAULT_TOPIC_REALMS,
-                "hall_keywords": DEFAULT_HALL_KEYWORDS,
+                "gate_keywords": DEFAULT_GATE_KEYWORDS,
             }
             with open(self._config_file, "w") as f:
                 json.dump(default_config, f, indent=2)

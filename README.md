@@ -227,7 +227,7 @@ Each dimension is a directory containing:
 - `entities.db` — SQLite with FTS5 for content + metadata
 - `faiss.index` or `chroma/` — vector index
 - `dimension.json` — configuration (backend, embedder)
-- `closets/` — packed entity storage
+- `nodes/` — packed entity storage
 - `entity_registry.json` — entity name mappings
 - `knowledge_graph.json` — relationship store
 

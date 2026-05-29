@@ -6,7 +6,7 @@ when vectors are lost or corrupted.
 
 Schema versions
 ---------------
-v0 — unversioned dimension (pre-migrate): realms, domains, entities (with FTS5), closets
+v0 — unversioned dimension (pre-migrate): realms, domains, entities (with FTS5), nodes
 v1 — adds _meta version tracking table and content_date column to entities
 v2 — renames wings→realms, rooms→domains, drawers→entities in DB tables
 """

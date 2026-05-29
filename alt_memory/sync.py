@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Optional, TypedDict
 
-from alt_memory.dimension import Dimension, get_closets_collection, purge_file_closets
+from alt_memory.dimension import Dimension, get_nodes_collection, purge_file_nodes
 
 logger = logging.getLogger(__name__)
 _BATCH = 1000
@@ -21,7 +21,7 @@ class SyncReport(TypedDict):
     no_source: int
     out_of_scope: int
     removed_entities: int
-    removed_closets: int
+    removed_nodes: int
     dry_run: bool
     by_source: dict[str, int]
 
@@ -290,7 +290,7 @@ def sync_dimension(
             report: SyncReport = {
                 **counts,
                 "removed_entities": 0,
-                "removed_closets": 0,
+                "removed_nodes": 0,
                 "dry_run": dry_run,
                 "by_source": dict(by_source),
             }
@@ -300,12 +300,12 @@ def sync_dimension(
 
             report["removed_entities"] = _delete_in_batches(dimension, removable_ids, wal_log=wal_log)
 
-            closet_rows = 0
+            node_rows = 0
             if removable_sources:
-                closets_col = get_closets_collection(str(dimension._base))
+                nodes_col = get_nodes_collection(str(dimension._base))
                 for src in removable_sources:
-                    closet_rows += purge_file_closets(closets_col, src)
-            report["removed_closets"] = closet_rows
+                    node_rows += purge_file_nodes(nodes_col, src)
+            report["removed_nodes"] = node_rows
 
         return report
     finally:

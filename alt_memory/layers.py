@@ -1,4 +1,4 @@
-"""Agent diary memory layers (L0-L3) stored as Dimension entities."""
+"""Agent record memory layers (L0-L3) stored as Dimension entities."""
 
 import logging
 from typing import Optional
@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryStack:
-    """Agent diary memory with hierarchical layers L0-L3.
+    """Agent record memory with hierarchical layers L0-L3.
 
     Each layer is stored as a domain within a per-agent realm:
       realm: agent_{sanitized_name}

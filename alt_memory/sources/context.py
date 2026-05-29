@@ -29,7 +29,7 @@ class PalaceContext:
     drawer_collection: _CollectionLike
     knowledge_graph: _KnowledgeGraphLike
     palace_path: str
-    closet_collection: Optional[_CollectionLike] = None
+    node_collection: Optional[_CollectionLike] = None
     config: Optional[Any] = None
     adapter_name: str = ""
     adapter_version: str = ""

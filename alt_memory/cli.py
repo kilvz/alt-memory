@@ -85,15 +85,15 @@ def main():
 
     p_kg_stats = sub.add_parser("kg-stats", help="KG statistics")
 
-    p_diary = sub.add_parser("diary", help="Write diary entry")
-    p_diary.add_argument("--agent", "-a", required=True)
-    p_diary.add_argument("--entry", "-e", required=True)
-    p_diary.add_argument("--topic", "-t", default="general")
-    p_diary.add_argument("--realm", "-w", default="")
+    p_record = sub.add_parser("record", help="Write record entry")
+    p_record.add_argument("--agent", "-a", required=True)
+    p_record.add_argument("--entry", "-e", required=True)
+    p_record.add_argument("--topic", "-t", default="general")
+    p_record.add_argument("--realm", "-w", default="")
 
-    p_diaryr = sub.add_parser("diary-read", help="Read diary entries")
-    p_diaryr.add_argument("--agent", "-a", required=True)
-    p_diaryr.add_argument("--last-n", type=int, default=10)
+    p_recordr = sub.add_parser("record-read", help="Read record entries")
+    p_recordr.add_argument("--agent", "-a", required=True)
+    p_recordr.add_argument("--last-n", type=int, default=10)
 
     p_dedup = sub.add_parser("check-dup", help="Check for duplicate content")
     p_dedup.add_argument("content")
@@ -113,6 +113,12 @@ def main():
     p_mine.add_argument("--domain", "-r", help="Domain name (projects mode)")
     p_mine.add_argument("--agent", default="alt-memory", help="Agent name (default: alt-memory)")
     p_mine.add_argument("--dry-run", action="store_true", help="Preview without filing")
+    p_mine.add_argument("--no-gitignore", action="store_true",
+                        help="Disable gitignore filtering when scanning directories")
+    p_mine.add_argument("--redetect-origin", action="store_true",
+                        help="Re-detect corpus origin even if already detected")
+    p_mine.add_argument("--file-limit", type=int, default=None,
+                        help="Maximum number of files to process")
 
     p_mcp = sub.add_parser("mcp", help="Run MCP server")
     p_mcp.add_argument("--host", default="127.0.0.1")
@@ -314,14 +320,14 @@ def main():
             s = dim.kg.stats()
             print(json.dumps(s, indent=2))
 
-        elif args.command == "diary":
-            wing = dim.diary_write(args.agent, args.entry, args.topic, args.realm)
-            print(f"Diary entry written to realm: {wing}")
+        elif args.command == "record":
+            wing = dim.record_write(args.agent, args.entry, args.topic, args.realm)
+            print(f"Record entry written to realm: {wing}")
 
-        elif args.command == "diary-read":
-            entries = dim.diary_read(args.agent, args.last_n)
+        elif args.command == "record-read":
+            entries = dim.record_read(args.agent, args.last_n)
             if not entries:
-                print("No diary entries.")
+                print("No record entries.")
             else:
                 for e in entries:
                     print(f"\n[{e['created_at']}] topic={e['metadata'].get('topic', '?')}")
@@ -370,9 +376,20 @@ def main():
                     dry_run=args.dry_run,
                 )
             else:
-                from alt_memory.miner import mine_file_into_dimension
-                count = mine_file_into_dimension(dim, args.file, args.realm, args.domain)
-                print(f"Mined {count} items from {args.file}")
+                filepath = Path(args.file)
+                if filepath.is_dir():
+                    from alt_memory.miner import batch_mine
+                    result = batch_mine(
+                        dim, str(filepath),
+                        realm=args.realm or "files",
+                        respect_gitignore=not args.no_gitignore,
+                        file_limit=args.file_limit,
+                    )
+                    print(f"Mined {result['drawers_created']} items from {args.file}")
+                else:
+                    from alt_memory.miner import mine_file_into_dimension
+                    count = mine_file_into_dimension(dim, args.file, args.realm, args.domain)
+                    print(f"Mined {count} items from {args.file}")
 
         # ── Ported upstream command handlers ─────────────────────────
 

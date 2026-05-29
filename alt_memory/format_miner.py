@@ -20,8 +20,15 @@ from pathlib import Path
 from typing import Optional, Union
 
 from alt_memory.config import AltMemoryConfig
-from alt_memory.miner import _chunk_text, _extract_entities_for_metadata
-from alt_memory.dimension import file_already_mined, get_closets_collection, mine_lock
+from alt_memory.miner import (
+    _chunk_text, _cleanup_mine_pid_file,
+    _compute_topic_tunnels_for_wing,
+    _extract_content_date, _extract_entities_for_metadata,
+)
+from alt_memory.dimension import (
+    Dimension, file_already_mined, get_nodes_collection, mine_lock,
+    _validate_dimension_fts5_after_mine,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -209,11 +216,11 @@ def scan_formats(directory: Union[Path, str]) -> list[Path]:
 
 
 def _register_format_sentinel(
-    closets_col, source_file: str, realm: str, agent: str
+    nodes_col, source_file: str, realm: str, agent: str
 ) -> None:
     sentinel_id = f"sentinel_format_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
     try:
-        closets_col.upsert(
+        nodes_col.upsert(
             documents=["[empty]"],
             ids=[sentinel_id],
             metadatas=[{
@@ -232,11 +239,11 @@ def _register_format_sentinel(
 
 
 def _register_skip_sentinel_if_appropriate(
-    closets_col, source_file: str, realm: str, agent: str, status: ExtractionStatus
+    nodes_col, source_file: str, realm: str, agent: str, status: ExtractionStatus
 ) -> None:
     if status in _TRANSIENT_MISSING_DEP_STATUSES:
         return
-    _register_format_sentinel(closets_col, source_file, realm, agent)
+    _register_format_sentinel(nodes_col, source_file, realm, agent)
 
 
 def _format_entity_id(realm: str, domain: str, source_file: str, chunk_index: int) -> str:
@@ -259,7 +266,7 @@ def mine_formats(
         realm = format_path.name.lower().replace(" ", "_").replace("-", "_")
 
     files: list[Path] = []
-    closets_col = None
+    nodes_col = None
     total_entities = 0
     files_skipped = 0
     files_with_text = 0
@@ -282,7 +289,7 @@ def mine_formats(
             print("  DRY RUN — nothing will be filed")
         print(f"{'-' * 55}\n")
 
-        closets_col = get_closets_collection(dim_path) if not dry_run else None
+        nodes_col = get_nodes_collection(dim_path) if not dry_run else None
 
         for i, filepath in enumerate(files, 1):
             source_file = str(filepath)
@@ -293,7 +300,7 @@ def mine_formats(
                     source_mtime = None
 
                 if not dry_run and file_already_mined(
-                    closets_col._conn, source_file, check_mtime=True
+                    nodes_col._conn, source_file, check_mtime=True
                 ):
                     files_skipped += 1
                     continue
@@ -303,22 +310,33 @@ def mine_formats(
 
                 if status != ExtractionStatus.OK or not text:
                     if not dry_run:
-                        _register_skip_sentinel_if_appropriate(closets_col, source_file, realm, agent, status)
+                        _register_skip_sentinel_if_appropriate(nodes_col, source_file, realm, agent, status)
                     print(f"  - [{i:4}/{len(files)}] {filepath.name[:50]:50} {status.name}")
                     continue
+
+                file_content_date = _extract_content_date(source_file, text)
 
                 raw_chunks = _chunk_text(
                     text,
                     min_size=palace_config.min_chunk_size,
                     max_size=palace_config.chunk_size,
                 )
-                chunks = [
-                    {"content": c, "chunk_index": i, "source_file": source_file}
-                    for i, c in enumerate(raw_chunks)
-                ]
+                chunks = []
+                search_pos = 0
+                for i, c in enumerate(raw_chunks):
+                    line_start = text[:search_pos].count("\n") + 1
+                    found_pos = text.find(c, search_pos)
+                    if found_pos >= 0:
+                        search_pos = found_pos + len(c)
+                    line_end = text[:search_pos].count("\n") + 1
+                    chunk = {"content": c, "chunk_index": i, "source_file": source_file}
+                    if found_pos >= 0:
+                        chunk["line_start"] = line_start
+                        chunk["line_end"] = line_end
+                    chunks.append(chunk)
                 if not chunks:
                     if not dry_run:
-                        _register_format_sentinel(closets_col, source_file, realm, agent)
+                        _register_format_sentinel(nodes_col, source_file, realm, agent)
                     print(f"  - [{i:4}/{len(files)}] {filepath.name[:50]:50} EMPTY_AFTER_CHUNK")
                     continue
 
@@ -333,7 +351,7 @@ def mine_formats(
                 entities_added = 0
                 with mine_lock(source_file):
                     if file_already_mined(
-                        closets_col._conn, source_file, check_mtime=True
+                        nodes_col._conn, source_file, check_mtime=True
                     ):
                         files_skipped += 1
                         continue
@@ -361,10 +379,16 @@ def mine_formats(
                                 meta["source_mtime"] = source_mtime
                             if entities:
                                 meta["entities"] = entities
+                            if chunk.get("line_start") is not None:
+                                meta["line_start"] = chunk["line_start"]
+                            if chunk.get("line_end") is not None:
+                                meta["line_end"] = chunk["line_end"]
+                            if file_content_date:
+                                meta["content_date"] = file_content_date
                             batch_ids.append(entity_id)
                             batch_docs.append(content)
                             batch_metas.append(meta)
-                        closets_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
+                        nodes_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
                         entities_added += len(batch)
 
                 total_entities += entities_added
@@ -381,6 +405,19 @@ def mine_formats(
     except Exception as exc:
         logger.warning("mine_formats: unexpected exception — %s: %s", type(exc).__name__, str(exc)[:200])
         print(f"\n  Mine aborted ({type(exc).__name__}: {str(exc)[:120]})", file=sys.stderr)
+
+    else:
+        if not dry_run:
+            _validate_dimension_fts5_after_mine(dim_path)
+            dim = Dimension(dim_path)
+            dim.init()
+            _compute_topic_tunnels_for_wing(realm, dim)
+
+    finally:
+        try:
+            _cleanup_mine_pid_file(dim_path)
+        except Exception:
+            logger.debug("mine_formats: _cleanup_mine_pid_file failed", exc_info=True)
 
     print(f"\n{'=' * 55}")
     print("  Summary")

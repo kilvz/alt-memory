@@ -12,29 +12,29 @@ from alt_memory.config import AltMemoryConfig
 from alt_memory.miner import _extract_entities_for_metadata
 from alt_memory.dimension import (
     Dimension,
-    build_closet_lines,
-    get_closets_collection,
+    build_node_lines,
+    get_nodes_collection,
     mine_lock,
-    purge_file_closets,
-    upsert_closet_lines,
+    purge_file_nodes,
+    upsert_node_lines,
 )
 
 logger = logging.getLogger(__name__)
 
-DIARY_ENTRY_RE = re.compile(r"^## .+", re.MULTILINE)
-CLOSET_CHAR_LIMIT = 2000
+RECORD_ENTRY_RE = re.compile(r"^## .+", re.MULTILINE)
+NODE_CHAR_LIMIT = 2000
 
 
-def _state_file_for(dim_path: str, diary_dir: Path) -> Path:
+def _state_file_for(dim_path: str, record_dir: Path) -> Path:
     state_root = Path(os.path.expanduser("~")) / ".alt-memory" / "state"
     state_root.mkdir(parents=True, exist_ok=True)
-    key = hashlib.sha256(f"{dim_path}|{diary_dir}".encode()).hexdigest()[:24]
-    return state_root / f"diary_ingest_{key}.json"
+    key = hashlib.sha256(f"{dim_path}|{record_dir}".encode()).hexdigest()[:24]
+    return state_root / f"record_ingest_{key}.json"
 
 
 def _split_entries(text: str) -> list[dict]:
-    parts = DIARY_ENTRY_RE.split(text)
-    headers = DIARY_ENTRY_RE.findall(text)
+    parts = RECORD_ENTRY_RE.split(text)
+    headers = RECORD_ENTRY_RE.findall(text)
     entries = []
     for i, header in enumerate(headers):
         body = parts[i + 1] if i + 1 < len(parts) else ""
@@ -52,14 +52,14 @@ def chunk_entry(body: str, max_chars: int = 2000) -> list[str]:
     return [body[i:i + max_chars] for i in range(0, len(body), max_chars)]
 
 
-def _diary_entity_id(source_file: str, entry_index: int, chunk_index: int) -> str:
+def _record_entity_id(source_file: str, entry_index: int, chunk_index: int) -> str:
     source_hash = hashlib.sha256(source_file.encode()).hexdigest()[:16]
-    return f"diary_{source_hash}_{entry_index}_{chunk_index}"
+    return f"record_{source_hash}_{entry_index}_{chunk_index}"
 
 
-def _diary_closet_id_base(realm: str, date_str: str) -> str:
+def _record_node_id_base(realm: str, date_str: str) -> str:
     suffix = hashlib.sha256(f"{realm}|{date_str}".encode()).hexdigest()[:24]
-    return f"closet_diary_{suffix}"
+    return f"node_record_{suffix}"
 
 
 def _purge_entities_with_source(dim: Dimension, source_file: str):
@@ -79,23 +79,23 @@ def _purge_entities_with_source(dim: Dimension, source_file: str):
         dim._db.commit()
 
 
-def ingest_diaries(
-    diary_dir,
+def ingest_records(
+    record_dir,
     dim_path,
-    realm="diary",
+    realm="record",
     force=False,
 ):
-    diary_dir = Path(diary_dir).expanduser().resolve()
-    if not diary_dir.exists():
-        print(f"Diary directory not found: {diary_dir}")
-        return {"days_updated": 0, "closets_created": 0}
+    record_dir = Path(record_dir).expanduser().resolve()
+    if not record_dir.exists():
+        print(f"Record directory not found: {record_dir}")
+        return {"days_updated": 0, "nodes_created": 0}
 
-    diary_files = sorted(diary_dir.glob("*.md"))
-    if not diary_files:
-        print(f"No .md files in {diary_dir}")
-        return {"days_updated": 0, "closets_created": 0}
+    record_files = sorted(record_dir.glob("*.md"))
+    if not record_files:
+        print(f"No .md files in {record_dir}")
+        return {"days_updated": 0, "nodes_created": 0}
 
-    state_file = _state_file_for(str(dim_path), diary_dir)
+    state_file = _state_file_for(str(dim_path), record_dir)
     if force or not state_file.exists():
         state = {}
     else:
@@ -106,22 +106,22 @@ def ingest_diaries(
 
     dim = Dimension(dim_path)
     dim.init()
-    closets_col = get_closets_collection(dim_path)
+    nodes_col = get_nodes_collection(dim_path)
 
     days_updated = 0
-    closets_created = 0
+    nodes_created = 0
 
-    for diary_path in diary_files:
-        text = diary_path.read_text(encoding="utf-8", errors="replace")
+    for record_path in record_files:
+        text = record_path.read_text(encoding="utf-8", errors="replace")
         if len(text.strip()) < 50:
             continue
 
-        date_match = re.match(r"(\d{4}-\d{2}-\d{2})", diary_path.stem)
+        date_match = re.match(r"(\d{4}-\d{2}-\d{2})", record_path.stem)
         if not date_match:
             continue
         date_str = date_match.group(1)
 
-        state_key = f"{realm}|{diary_path.name}"
+        state_key = f"{realm}|{record_path.name}"
         prev_entry = state.get(state_key, {})
         prev_hash = prev_entry.get("content_hash")
         curr_size = len(text)
@@ -136,7 +136,7 @@ def ingest_diaries(
         content_changed = prev_hash is not None and curr_hash != prev_hash
         now_iso = datetime.now(timezone.utc).isoformat()
         entities = _extract_entities_for_metadata(text)
-        source_file = str(diary_path)
+        source_file = str(record_path)
 
         with mine_lock(source_file):
             entries = _split_entries(text)
@@ -152,10 +152,10 @@ def ingest_diaries(
                 all_lines = []
                 for entry in new_entries:
                     entry_text = f"{entry['header']}\n{entry['body']}" if entry['body'] else entry['header']
-                    chunks = chunk_entry(entry_text, CLOSET_CHAR_LIMIT)
+                    chunks = chunk_entry(entry_text, NODE_CHAR_LIMIT)
                     entry_ids = []
                     for chunk_idx, chunk_text in enumerate(chunks):
-                        eid = _diary_entity_id(source_file, entry['entry_index'], chunk_idx)
+                        eid = _record_entity_id(source_file, entry['entry_index'], chunk_idx)
                         entry_ids.append(eid)
                         dim.add_entity(
                             realm=realm,
@@ -172,7 +172,7 @@ def ingest_diaries(
                             source_file=source_file,
                             entity_id=eid,
                         )
-                    entry_lines = build_closet_lines(
+                    entry_lines = build_node_lines(
                         text=entry_text,
                         existing={},
                         source_line=source_file,
@@ -181,8 +181,8 @@ def ingest_diaries(
                     all_lines.extend(entry_lines)
 
                 if all_lines:
-                    closet_id_base = _diary_closet_id_base(realm, date_str)
-                    closet_meta = {
+                    node_id_base = _record_node_id_base(realm, date_str)
+                    node_meta = {
                         "date": date_str,
                         "realm": realm,
                         "domain": "daily",
@@ -190,11 +190,11 @@ def ingest_diaries(
                         "filed_at": now_iso,
                     }
                     if entities:
-                        closet_meta["entities"] = entities
+                        node_meta["entities"] = entities
                     if full_rebuild:
-                        purge_file_closets(closets_col, source_file)
-                    n = upsert_closet_lines(closets_col, closet_id_base, all_lines, closet_meta)
-                    closets_created += n
+                        purge_file_nodes(nodes_col, source_file)
+                    n = upsert_node_lines(nodes_col, node_id_base, all_lines, node_meta)
+                    nodes_created += n
 
             state[state_key] = {
                 "size": curr_size,
@@ -206,9 +206,9 @@ def ingest_diaries(
 
     state_file.write_text(json.dumps(state, indent=2))
     if days_updated:
-        print(f"Diary: {days_updated} days updated, {closets_created} new closets")
+        print(f"Record: {days_updated} days updated, {nodes_created} new nodes")
 
-    return {"days_updated": days_updated, "closets_created": closets_created}
+    return {"days_updated": days_updated, "nodes_created": nodes_created}
 
 
 if __name__ == "__main__":
@@ -217,7 +217,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ingest daily summaries into the dimension")
     parser.add_argument("--dir", required=True, help="Path to daily_summaries directory")
     parser.add_argument("--dimension", default=os.path.expanduser("~/.alt-memory"))
-    parser.add_argument("--realm", default="diary")
+    parser.add_argument("--realm", default="record")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
-    ingest_diaries(args.dir, args.dimension, realm=args.realm, force=args.force)
+    ingest_records(args.dir, args.dimension, realm=args.realm, force=args.force)

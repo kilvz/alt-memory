@@ -110,7 +110,7 @@ class KnowledgeGraph:
 
     _MIGRATE_COL_WHITELIST = {
         "confidence": "REAL DEFAULT 1.0",
-        "source_closet": "TEXT",
+        "source_node": "TEXT",
         "source_file": "TEXT",
         "source_entity_id": "TEXT",
         "adapter_name": "TEXT",
@@ -170,7 +170,7 @@ class KnowledgeGraph:
                    valid_from: Optional[str] = None,
                    valid_to: Optional[str] = None,
                    confidence: float = 1.0,
-                   source_closet: Optional[str] = None,
+                   source_node: Optional[str] = None,
                    source_file: Optional[str] = None,
                     source_entity_id: Optional[str] = None,
                     adapter_name: Optional[str] = None) -> int:
@@ -205,18 +205,18 @@ class KnowledgeGraph:
             if existing:
                 conn.execute(
                     "UPDATE facts SET valid_from=?, valid_to=?, confidence=?, "
-                    "source_closet=?, source_file=?, source_entity_id=?, adapter_name=? "
+                    "source_node=?, source_file=?, source_entity_id=?, adapter_name=? "
                     "WHERE id=?",
-                    (valid_from, valid_to, confidence, source_closet, source_file,
+                    (valid_from, valid_to, confidence, source_node, source_file,
                      source_entity_id, adapter_name, existing["id"]))
                 conn.commit()
                 return existing["id"]
             conn.execute(
                 "INSERT INTO facts (subject, predicate, object, valid_from, valid_to, "
-                "confidence, source_closet, source_file, source_entity_id, adapter_name) "
+                "confidence, source_node, source_file, source_entity_id, adapter_name) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (subject, pred, obj, valid_from, valid_to,
-                 confidence, source_closet, source_file, source_entity_id, adapter_name))
+                 confidence, source_node, source_file, source_entity_id, adapter_name))
             conn.commit()
             return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
@@ -316,7 +316,7 @@ class KnowledgeGraph:
                         "valid_from": r["valid_from"],
                         "valid_to": r["valid_to"],
                         "confidence": r["confidence"] if r["confidence"] is not None else 1.0,
-                        "source_closet": r.get("source_closet"),
+                        "source_node": r.get("source_node"),
                         "source_file": r.get("source_file"),
                         "source_entity_id": r.get("source_entity_id"),
                         "adapter_name": r.get("adapter_name"),
@@ -335,7 +335,7 @@ class KnowledgeGraph:
                         "valid_from": r["valid_from"],
                         "valid_to": r["valid_to"],
                         "confidence": r["confidence"] if r["confidence"] is not None else 1.0,
-                        "source_closet": r.get("source_closet"),
+                        "source_node": r.get("source_node"),
                         "source_file": r.get("source_file"),
                         "source_entity_id": r.get("source_entity_id"),
                         "adapter_name": r.get("adapter_name"),

@@ -47,7 +47,7 @@ class SourceRef:
 class RouteHint:
     wing: Optional[str] = None
     room: Optional[str] = None
-    hall: Optional[str] = None
+    gate: Optional[str] = None
 
 
 @dataclass(frozen=True)

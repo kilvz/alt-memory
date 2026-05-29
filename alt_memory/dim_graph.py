@@ -80,8 +80,8 @@ def build_graph(dimension=None, config=None):
     switching collections should call ``invalidate_graph_cache()`` first.
 
     Returns:
-        nodes: dict of {domain: {realms: set, halls: set, count: int}}
-        edges: list of {domain, realm_a, realm_b, hall} — one per tunnel crossing
+        nodes: dict of {domain: {realms: set, gates: set, count: int}}
+        edges: list of {domain, realm_a, realm_b, gate} — one per tunnel crossing
     """
     global _graph_cache_nodes, _graph_cache_edges, _graph_cache_time
     now = time.time()
@@ -103,18 +103,18 @@ def build_graph(dimension=None, config=None):
         if conn:
             conn.close()
 
-    domain_data = defaultdict(lambda: {"realms": set(), "halls": set(), "count": 0, "dates": set()})
+    domain_data = defaultdict(lambda: {"realms": set(), "gates": set(), "count": 0, "dates": set()})
 
     for row in rows:
         meta = json.loads(row["metadata"] or "{}")
         domain = row["domain"] or meta.get("domain", "")
         realm = row["realm"] or meta.get("realm", "")
-        hall = meta.get("hall", "")
+        gate = meta.get("gate", "")
         date = meta.get("date", "")
         if domain and domain != "general" and realm:
             domain_data[domain]["realms"].add(realm)
-            if hall:
-                domain_data[domain]["halls"].add(hall)
+            if gate:
+                domain_data[domain]["gates"].add(gate)
             if date:
                 domain_data[domain]["dates"].add(date)
             domain_data[domain]["count"] += 1
@@ -125,12 +125,12 @@ def build_graph(dimension=None, config=None):
         if len(realms) >= 2:
             for i, ra in enumerate(realms):
                 for rb in realms[i + 1:]:
-                    for hall in data["halls"]:
+                    for gate in data["gates"]:
                         edges.append({
                             "domain": domain,
                             "realm_a": ra,
                             "realm_b": rb,
-                            "hall": hall,
+                            "gate": gate,
                             "count": data["count"],
                         })
 
@@ -157,7 +157,7 @@ def traverse(start_domain: str, dimension=None, config=None, max_hops: int = 2):
     Walk the graph from a starting domain. Find connected domains
     through shared realms.
 
-    Returns list of paths: [{domain, realm, hall, hop_distance}]
+    Returns list of paths: [{domain, realm, gate, hop_distance}]
     """
     nodes, edges = build_graph(dimension, config)
 
@@ -210,7 +210,7 @@ def traverse(start_domain: str, dimension=None, config=None, max_hops: int = 2):
 def find_tunnels(realm_a: str = None, realm_b: str = None, dimension=None, config=None):
     """
     Find domains that connect two realms (or all tunnel domains if no realms specified).
-    These are the "hallways" — same named idea appearing in multiple domains.
+    These are the "gateways" — same named idea appearing in multiple domains.
     """
     nodes, edges = build_graph(dimension, config)
 
@@ -732,14 +732,14 @@ def topic_tunnels_for_realm(
 
 def entity_tunnels_for_realm(
     realm: str,
-    hallways: list,
+    gateways: list,
     label_prefix: str = "shared entity",
     dimension=None,
 ) -> list:
     """Compute entity tunnels involving a single realm.
 
     An entity tunnel bridges two realms when the same entity (person,
-    project, concept, interest) appears in within-realm hallways of both.
+    project, concept, interest) appears in within-realm gateways of both.
     This is the architectural counterpart to ``topic_tunnels_for_realm`` —
     same storage path (``create_tunnel`` → tunnels.json),
     same dedup, same listing API.
@@ -751,13 +751,13 @@ def entity_tunnels_for_realm(
     Topic tunnels are NOT replaced — both systems coexist for one release
     cycle while entity tunnels prove out. Deprecation is a separate PR.
     """
-    if not hallways or not isinstance(realm, str) or not realm.strip():
+    if not gateways or not isinstance(realm, str) or not realm.strip():
         return []
 
     realm_norm = normalize_realm_name(realm.strip())
 
     entity_realms: dict = {}
-    for h in hallways:
+    for h in gateways:
         if not isinstance(h, dict):
             continue
         h_realm = h.get("realm")

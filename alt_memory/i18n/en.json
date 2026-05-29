@@ -2,11 +2,11 @@
   "lang": "en",
   "label": "English",
   "terms": {
-    "palace": "dimension",
-    "wing": "realm",
-    "hall": "hall",
-    "closet": "closet",
-    "drawer": "entity",
+    "dimension": "dimension",
+    "realm": "realm",
+    "gate": "gate",
+    "node": "node",
+    "entity": "entity",
     "mine": "mine",
     "search": "search",
     "status": "status",
@@ -18,19 +18,19 @@
   },
   "cli": {
     "mine_start": "Mining {path}...",
-    "mine_complete": "Done. {closets} closets, {drawers} drawers created.",
+    "mine_complete": "Done. {nodes} nodes, {entities} entities created.",
     "mine_skip": "Already mined. Use --force to re-mine.",
     "search_no_results": "No results for: {query}",
     "search_results": "Found {count} results:",
-    "status_palace": "Dimension: {path}",
-    "status_wings": "{count} realms",
-    "status_closets": "{count} closets",
-    "status_drawers": "{count} entities",
+    "status_dimension": "Dimension: {path}",
+    "status_realms": "{count} realms",
+    "status_nodes": "{count} nodes",
+    "status_entities": "{count} entities",
     "init_complete": "Dimension initialized at {path}",
     "init_exists": "Dimension already exists at {path}",
     "repair_complete": "Repair complete. {fixed} issues fixed.",
     "migrate_complete": "Migration complete.",
-    "no_palace": "No dimension found. Run: alt-memory init <dir>"
+    "no_dimension": "No dimension found. Run: alt-memory init <dir>"
   },
   "aaak": {
     "instruction": "Compress to index format. Hyphens between words, pipes between concepts. Drop articles and filler. Keep names and numbers exact."

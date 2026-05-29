@@ -57,14 +57,14 @@ def _alt_memory_python() -> str:
 
 STOP_BLOCK_REASON = (
     "Alt Memory auto-save checkpoint. "
-    "Use alt_memory_diary_write (session summary) and alt_memory_add_drawer "
+    "Use alt_memory_record_write (session summary) and alt_memory_add_drawer "
     "(quotes, decisions, code) to save session content. "
     "Do NOT use native auto-memory files."
 )
 
 PRECOMPACT_BLOCK_REASON = (
     "Alt Memory emergency save — compaction imminent. "
-    "Use alt_memory_diary_write (thorough summary) and alt_memory_add_drawer "
+    "Use alt_memory_record_write (thorough summary) and alt_memory_add_drawer "
     "(ALL quotes, decisions, code, context) to save ALL content before context is lost. "
     "Do NOT use native auto-memory files."
 )
@@ -421,7 +421,7 @@ def _extract_themes(messages: list[str], max_themes: int = 3) -> list[str]:
     return [w for w, _ in words.most_common(max_themes)]
 
 
-def _save_diary_direct(transcript_path: str, session_id: str, realm: str = "", toast: bool = False) -> dict:
+def _save_record_direct(transcript_path: str, session_id: str, realm: str = "", toast: bool = False) -> dict:
     messages = _extract_recent_messages(transcript_path)
     if not messages:
         _log("No recent messages to save")
@@ -436,11 +436,11 @@ def _save_diary_direct(transcript_path: str, session_id: str, realm: str = "", t
     )
 
     try:
-        from alt_memory.mcp_server import tool_diary_write
+        from alt_memory.mcp_server import _record_write as tool_record_write
 
-        result = tool_diary_write(agent_name="session-hook", entry=entry, topic="checkpoint", realm=realm)
-        if result.get("success"):
-            _log(f"Diary checkpoint saved: {result.get('entry_id', '?')}")
+        result = tool_record_write({"agent": "session-hook", "entry": entry, "topic": "checkpoint", "realm": realm})
+        if result.get("realm"):
+            _log(f"Record checkpoint saved: {result.get('realm', '?')}")
             try:
                 ack_file = STATE_DIR / "last_checkpoint"
                 ack_file.write_text(json.dumps({"msgs": len(messages), "ts": now.isoformat()}), encoding="utf-8")
@@ -450,9 +450,9 @@ def _save_diary_direct(transcript_path: str, session_id: str, realm: str = "", t
                 _desktop_toast(f"Checkpoint saved — {len(messages)} messages archived")
             return {"count": len(messages), "themes": themes}
         else:
-            _log(f"Diary checkpoint failed: {result.get('error', 'unknown')}")
+            _log(f"Record checkpoint failed: {result.get('error', 'unknown')}")
     except Exception as e:
-        _log(f"Diary checkpoint error: {e}")
+        _log(f"Record checkpoint error: {e}")
     return {"count": 0}
 
 
@@ -603,7 +603,7 @@ def hook_stop(data: dict, harness: str):
         if silent:
             result = {"count": 0}
             if transcript_path:
-                result = _save_diary_direct(transcript_path, session_id, realm=project_realm, toast=toast)
+                result = _save_record_direct(transcript_path, session_id, realm=project_realm, toast=toast)
                 _ingest_transcript(transcript_path)
             _maybe_auto_ingest()
             count = result.get("count", 0)
@@ -625,7 +625,7 @@ def hook_stop(data: dict, harness: str):
             if transcript_path:
                 _ingest_transcript(transcript_path)
             _maybe_auto_ingest()
-            reason = STOP_BLOCK_REASON + f" Write diary entry to realm={project_realm}."
+            reason = STOP_BLOCK_REASON + f" Write record entry to realm={project_realm}."
             _output({"decision": "block", "reason": reason})
     else:
         _output({})

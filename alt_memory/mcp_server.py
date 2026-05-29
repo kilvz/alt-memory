@@ -48,11 +48,37 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Write-Ahead Log (WAL)
-_WAL_DIR = os.path.join(os.path.expanduser("~"), ".alt-memory", "wal")
-os.makedirs(_WAL_DIR, exist_ok=True)
-_WAL_FILE = os.path.join(_WAL_DIR, "write_log.jsonl")
-_WAL_REDACT_KEYS = frozenset({"content", "entry", "query", "text", "metadata"})
+_WAL_REDACT_KEYS = frozenset(
+    {"content", "content_preview", "document", "entry", "entry_preview", "query", "text"}
+)
+_WAL_FILE = os.path.join(
+    os.environ.get("ALT_MEMORY_HOME", os.path.expanduser("~/.alt-memory")),
+    "mcp_wal.jsonl",
+)
+
+
+def _init_mcp_logging() -> None:
+    """Init logging: stderr-by-default, optionally append to ALT_MEMORY_LOG_FILE."""
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    log_file = os.environ.get("ALT_MEMORY_LOG_FILE", "").strip()
+    file_handler_error: Exception | None = None
+    if log_file:
+        try:
+            handlers.append(logging.FileHandler(log_file, mode="a", encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            file_handler_error = exc
+    logging.basicConfig(
+        level=logging.INFO, format="%(message)s",
+        handlers=handlers, force=True,
+    )
+    if file_handler_error is not None:
+        logger.warning(
+            "ALT_MEMORY_LOG_FILE=%r could not be opened (%s); using stderr only",
+            log_file, file_handler_error,
+        )
+
+
+_init_mcp_logging()
 
 
 def _wal_log(dimension: str, method: str, params: dict, result: Any = None, error: str = "") -> None:
@@ -145,7 +171,7 @@ AAAK_SPEC = (
     "  STRUCTURE: Pipe-separated fields. FAM: family | PROJ: projects | ⚠: warnings/reminders.\n"
     "  DATES: ISO format (2026-03-31). COUNTS: Nx = N mentions (e.g., 570x).\n"
     "  IMPORTANCE: ★ to ★★★★★ (1-5 scale).\n"
-    "  HALLS: hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice.\n"
+    "  GATES: gate_facts, gate_events, gate_discoveries, gate_preferences, gate_advice.\n"
     "  WINGS: alt_memory, documents, reference, benchmark, agent_*\n"
     "  ROOMS: Hyphenated slugs representing named ideas (e.g., chromadb-setup, gpu-pricing).\n\n"
     "EXAMPLE:\n"
@@ -331,13 +357,13 @@ def _build_tool_definitions() -> list[dict]:
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
-            "name": "diary_write",
-            "description": "Write a diary entry for an agent",
+            "name": "record_write",
+            "description": "Write a record entry for an agent",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "agent": {"type": "string", "description": "Agent name"},
-                    "entry": {"type": "string", "description": "Diary entry text"},
+                    "entry": {"type": "string", "description": "Record entry text"},
                     "topic": {"type": "string", "description": "Topic tag"},
                     "realm": {"type": "string", "description": "Target realm (default agent_<name>)"},
                 },
@@ -345,8 +371,8 @@ def _build_tool_definitions() -> list[dict]:
             },
         },
         {
-            "name": "diary_read",
-            "description": "Read recent diary entries for an agent",
+            "name": "record_read",
+            "description": "Read recent record entries for an agent",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -492,7 +518,7 @@ def _build_tool_definitions() -> list[dict]:
         },
         {
             "name": "find_tunnels",
-            "description": "Find domains that bridge two realms — the hallways connecting different domains",
+            "description": "Find domains that bridge two realms — the gateways connecting different domains",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -670,7 +696,7 @@ def _build_tool_definitions() -> list[dict]:
         },
         {
             "name": "list_agents",
-            "description": "List all agent diary writers in the dimension",
+            "description": "List all agent record writers in the dimension",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
@@ -705,8 +731,36 @@ class MCPServer:
         self.entity_registry = EntityRegistry(dim)
         self.memory_stack = MemoryStack(dim) if HAS_LAYERS else None
 
+        self._metadata_cache: Optional[dict] = None
+        self._metadata_cache_time: float = 0.0
+        self._metadata_cache_ttl: float = 5.0
+
         self._methods: dict[str, tuple] = {}
         self._register_all()
+
+    def _invalidate_metadata_cache(self) -> None:
+        self._metadata_cache = None
+        self._metadata_cache_time = 0.0
+
+    def _fetch_all_metadata(self) -> dict:
+        now = time.monotonic()
+        if self._metadata_cache is not None and (now - self._metadata_cache_time) < self._metadata_cache_ttl:
+            return self._metadata_cache
+        realms = self.dim.list_realms()
+        domains = self.dim._db_execute(
+            "SELECT name, realm, description, created_at FROM domains ORDER BY realm, name"
+        ).fetchall()
+        total = self.dim._db_execute("SELECT COUNT(*) FROM entities").fetchone()[0]
+        total_domains = len(domains)
+        data = {
+            "realms": realms,
+            "domains": [{"name": r[0], "realm": r[1], "description": r[2], "created_at": r[3]} for r in domains],
+            "total_entities": total,
+            "total_domains": total_domains,
+        }
+        self._metadata_cache = data
+        self._metadata_cache_time = now
+        return data
 
     def _register(self, name: str, handler: callable, required: list[str] | None = None):
         self._methods[name] = (handler, required or [])
@@ -747,8 +801,8 @@ class MCPServer:
         self._register("kg_stats", self._kg_stats, [])
         self._register("kg_timeline", self._kg_timeline, [])
 
-        self._register("diary_write", self._diary_write, ["agent", "entry"])
-        self._register("diary_read", self._diary_read, ["agent"])
+        self._register("record_write", self._record_write, ["agent", "entry"])
+        self._register("record_read", self._record_read, ["agent"])
         self._register("memory_write", self._memory_write, ["agent", "layer", "content"])
         self._register("memory_read", self._memory_read, ["agent"])
         self._register("memory_summarize", self._memory_summarize, ["agent"])
@@ -851,6 +905,47 @@ class MCPServer:
         if handler_info is None:
             raise ValueError(f"Unknown tool: {name}")
         handler, required = handler_info
+
+        # Whitelist arguments to declared schema properties only.
+        # Prevents callers from spoofing internal params.
+        import inspect
+
+        try:
+            sig = inspect.signature(handler)
+            accepts_var_keyword = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            )
+        except (ValueError, TypeError):
+            accepts_var_keyword = False
+
+        # Build schema properties map from _TOOL_DEFINITIONS
+        schema_props = {}
+        for td in _TOOL_DEFINITIONS:
+            if td.get("name") == name:
+                schema_props = td.get("inputSchema", {}).get("properties", {})
+                break
+
+        if not accepts_var_keyword:
+            unknown = [k for k in args if k not in schema_props and k != "wait_for_previous"]
+            if unknown:
+                quoted = ", ".join(f"'{k}'" for k in unknown)
+                word = "parameter" if len(unknown) == 1 else "parameters"
+                raise ValueError(f"Unknown {word} {quoted} for tool {name}")
+            args = {k: v for k, v in args.items() if k in schema_props}
+
+        # Coerce argument types based on input_schema
+        for key, value in list(args.items()):
+            prop_schema = schema_props.get(key, {})
+            declared_type = prop_schema.get("type")
+            try:
+                if declared_type == "integer" and not isinstance(value, int):
+                    args[key] = int(value)
+                elif declared_type == "number" and not isinstance(value, (int, float)):
+                    args[key] = float(value)
+            except (ValueError, TypeError):
+                raise ValueError(f"Invalid value for parameter '{key}'")
+        args.pop("wait_for_previous", None)
+
         missing = [p for p in required if p not in args or args[p] is None or (isinstance(args[p], str) and not args[p].strip())]
         if missing:
             raise ValueError(f"Missing required parameter(s): {', '.join(missing)}")
@@ -867,7 +962,13 @@ class MCPServer:
         return {"pong": True, "version": VERSION}
 
     def _get_status(self, params: dict) -> dict:
-        return self.dim.status()
+        s = self.dim.status()
+        cached = self._fetch_all_metadata()
+        s["entities"] = cached["total_entities"]
+        s["domains"] = cached["total_domains"]
+        s["realms"] = len(cached["realms"])
+        s["realms_detail"] = cached["realms"]
+        return s
 
     def _init_dimension(self, params: dict) -> dict:
         return {"created": self.dim.init()}
@@ -877,24 +978,33 @@ class MCPServer:
         return {"closed": True}
 
     def _list_realms(self, params: dict) -> list:
-        return self.dim.list_realms()
+        return self._fetch_all_metadata()["realms"]
 
     def _create_realm(self, params: dict) -> dict:
         name = self.dim.get_or_create_realm(params["name"], params.get("description", ""))
+        self._invalidate_metadata_cache()
         return {"name": name}
 
     def _delete_realm(self, params: dict) -> dict:
-        return {"deleted": self.dim.delete_realm(params["name"])}
+        result = {"deleted": self.dim.delete_realm(params["name"])}
+        self._invalidate_metadata_cache()
+        return result
 
     def _list_domains(self, params: dict) -> list:
-        return self.dim.list_domains(realm=params.get("realm"))
+        realm = params.get("realm")
+        if realm:
+            return self.dim.list_domains(realm=realm)
+        return self._fetch_all_metadata()["domains"]
 
     def _create_domain(self, params: dict) -> dict:
         name = self.dim.get_or_create_domain(params["realm"], params["name"], params.get("description", ""))
+        self._invalidate_metadata_cache()
         return {"name": name}
 
     def _delete_domain(self, params: dict) -> dict:
-        return {"deleted": self.dim.delete_domain(params["realm"], params["name"])}
+        result = {"deleted": self.dim.delete_domain(params["realm"], params["name"])}
+        self._invalidate_metadata_cache()
+        return result
 
     def _add_entity(self, params: dict) -> dict:
         _wal_log(str(self.dim._base), "add_entity", {
@@ -912,12 +1022,19 @@ class MCPServer:
             source_file=params.get("source_file", ""),
             entity_id=params.get("entity_id"),
         )
+        self._invalidate_metadata_cache()
         return {"entity_id": did}
 
     def _get_entity(self, params: dict) -> dict | None:
         entity = self.dim.get_entity(params["entity_id"])
         if entity is None:
             return {"found": False}
+        # source_file is the absolute filesystem path — reduce to basename
+        # so MCP clients don't leak filesystem structure to untrusted agents
+        if isinstance(entity, dict) and entity.get("source_file"):
+            entity["source_file"] = Path(entity["source_file"]).name
+        if isinstance(entity, dict) and entity.get("metadata", {}).get("source_file"):
+            entity["metadata"]["source_file"] = Path(entity["metadata"]["source_file"]).name
         return entity
 
     def _list_entities(self, params: dict) -> list:
@@ -943,11 +1060,14 @@ class MCPServer:
             realm=params.get("realm"),
             domain=params.get("domain"),
         )
+        self._invalidate_metadata_cache()
         return {"updated": ok}
 
     def _delete_entity(self, params: dict) -> dict:
         _wal_log(str(self.dim._base), "delete_entity", {"entity_id": params["entity_id"]})
-        return {"deleted": self.dim.delete_entity(params["entity_id"])}
+        result = {"deleted": self.dim.delete_entity(params["entity_id"])}
+        self._invalidate_metadata_cache()
+        return result
 
     def _search(self, params: dict) -> list:
         results = self.dim.search(
@@ -957,17 +1077,20 @@ class MCPServer:
             domain=params.get("domain"),
             mode=params.get("mode", "hybrid"),
         )
-        return [
-            {
+        out = []
+        for r in results:
+            meta = (r.metadata or {}).copy()
+            if meta.get("source_file"):
+                meta["source_file"] = Path(meta["source_file"]).name
+            out.append({
                 "id": r.id,
                 "text": r.text,
                 "distance": r.distance,
-                "metadata": r.metadata,
+                "metadata": meta,
                 "realm": r.realm,
                 "domain": r.domain,
-            }
-            for r in results
-        ]
+            })
+        return out
 
     def _check_duplicate(self, params: dict) -> dict:
         dup = self.dim.check_duplicate(params["content"], threshold=params.get("threshold", 0.9))
@@ -1022,23 +1145,24 @@ class MCPServer:
     def _kg_stats(self, params: dict) -> dict:
         return self.dim.kg.stats()
 
-    def _diary_write(self, params: dict) -> dict:
-        _wal_log(str(self.dim._base), "diary_write", {
+    def _record_write(self, params: dict) -> dict:
+        _wal_log(str(self.dim._base), "record_write", {
             "agent": params["agent"],
             "entry": params["entry"],
             "topic": params.get("topic", "general"),
             "realm": params.get("realm", ""),
         })
-        wing = self.dim.diary_write(
+        wing = self.dim.record_write(
             params["agent"],
             params["entry"],
             topic=params.get("topic", "general"),
             realm=params.get("realm", ""),
         )
+        self._invalidate_metadata_cache()
         return {"realm": wing}
 
-    def _diary_read(self, params: dict) -> list:
-        return self.dim.diary_read(
+    def _record_read(self, params: dict) -> list:
+        return self.dim.record_read(
             params["agent"],
             last_n=params.get("last_n", 10),
             realm=params.get("realm", ""),
@@ -1046,13 +1170,15 @@ class MCPServer:
 
     def _memory_write(self, params: dict) -> Any:
         self._require_layers()
-        return self.memory_stack.write(
+        result = self.memory_stack.write(
             params["agent"],
             params["layer"],
             params["content"],
             topic=params.get("topic"),
             metadata=params.get("metadata"),
         )
+        self._invalidate_metadata_cache()
+        return result
 
     def _memory_read(self, params: dict) -> list:
         self._require_layers()
@@ -1071,11 +1197,12 @@ class MCPServer:
         count = miner.mine_file_into_dimension(
             self.dim, params["filepath"], params["realm"], params["domain"],
         )
+        self._invalidate_metadata_cache()
         return {"items_mined": count}
 
     def _mine_text(self, params: dict) -> Any:
         self._require_miner()
-        return miner.mine_text_into_dimension(
+        result = miner.mine_text_into_dimension(
             self.dim,
             params["text"],
             params["realm"],
@@ -1083,6 +1210,8 @@ class MCPServer:
             source=params.get("source"),
             chunk=params.get("chunk", True),
         )
+        self._invalidate_metadata_cache()
+        return result
 
     def _batch_mine(self, params: dict) -> dict:
         self._require_miner()
@@ -1092,6 +1221,7 @@ class MCPServer:
             realm=params.get("realm"),
             pattern=params.get("pattern"),
         )
+        self._invalidate_metadata_cache()
         return {"items_mined": count}
 
     def _aaak_compress(self, params: dict) -> str:
@@ -1106,6 +1236,7 @@ class MCPServer:
     def _rebuild_fts(self, params: dict) -> dict:
         _wal_log(str(self.dim._base), "rebuild_fts", {})
         self.dim.rebuild_fts()
+        self._invalidate_metadata_cache()
         return {"rebuilt": True}
 
     def _kg_timeline(self, params: dict) -> list:
@@ -1176,6 +1307,7 @@ class MCPServer:
             realm=params.get("realm"),
             dry_run=not params.get("apply", False),
         )
+        self._invalidate_metadata_cache()
         return dict(report)
 
     def _reconnect(self, params: dict) -> dict:
@@ -1217,7 +1349,7 @@ class MCPServer:
         return {"default_embedder": model}
 
     def _list_agents(self, params: dict) -> list:
-        """Discover agent diary writers by scanning agent_* realms."""
+        """Discover agent record writers by scanning agent_* realms."""
         agents = []
         for realm in self.dim.list_realms():
             name = realm.get("name", "")

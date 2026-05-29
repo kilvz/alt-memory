@@ -10,21 +10,19 @@ Same dimension as project mining. Different ingest strategy.
     Adapted for alt-memory FAISS-backed Dimension.
 """
 
-import contextlib
 import hashlib
 import json
 import logging
 import os
 import sqlite3
 import sys
-import threading
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from alt_memory.normalize import normalize
-from alt_memory.dimension import Dimension, mine_lock
+from alt_memory.dimension import Dimension, mine_lock, mine_dimension_lock, MineAlreadyRunning
 
 logger = logging.getLogger("alt_memory")
 
@@ -63,23 +61,23 @@ SKIP_DIRS = {
     "target",
 }
 
-# Cached hall keywords — avoids re-reading config per entity
-_HALL_KEYWORDS_CACHE = None
+# Cached gate keywords — avoids re-reading config per entity
+_GATE_KEYWORDS_CACHE = None
 
 
-def _detect_hall_cached(content: str) -> str:
-    """Route content to a hall using cached keywords. Same logic as miner.detect_hall."""
-    global _HALL_KEYWORDS_CACHE
-    if _HALL_KEYWORDS_CACHE is None:
+def _detect_gate_cached(content: str) -> str:
+    """Route content to a gate using cached keywords. Same logic as miner.detect_gate."""
+    global _GATE_KEYWORDS_CACHE
+    if _GATE_KEYWORDS_CACHE is None:
         from alt_memory.config import AltMemoryConfig
 
-        _HALL_KEYWORDS_CACHE = AltMemoryConfig().hall_keywords
+        _GATE_KEYWORDS_CACHE = AltMemoryConfig().gate_keywords
     content_lower = content[:3000].lower()
     scores = {}
-    for hall, keywords in _HALL_KEYWORDS_CACHE.items():
+    for gate, keywords in _GATE_KEYWORDS_CACHE.items():
         score = sum(1 for kw in keywords if kw in content_lower)
         if score > 0:
-            scores[hall] = score
+            scores[gate] = score
     return max(scores, key=scores.get) if scores else "general"
 
 
@@ -427,174 +425,6 @@ def detect_convo_domain(content: str) -> str:
 # =============================================================================
 
 
-class MineAlreadyRunning(RuntimeError):
-    """Raised when another `alt-memory mine` already holds the per-dimension lock."""
-
-
-class MineValidationError(RuntimeError):
-    """Raised at end of mine when PRAGMA quick_check on the dimension reports errors."""
-
-
-# Per-thread record of dimensions this thread already holds the lock for. Used by
-# `mine_dimension_lock` to short-circuit re-entrant acquisition from the same
-# thread. Without this guard the inner call would block on its own outer flock
-# (Linux fcntl locks are per open file description, so a same-thread second
-# open of the lock file is a distinct lock and self-deadlocks).
-#
-# The holder set is tagged with ``pid`` so that a forked child does NOT
-# inherit re-entrant credit from its parent.
-_palace_lock_holders = threading.local()
-
-
-def _holder_state():
-    """Return the per-thread (pid, keys) record, refreshing after fork."""
-    keys = getattr(_palace_lock_holders, "keys", None)
-    pid = getattr(_palace_lock_holders, "pid", None)
-    current_pid = os.getpid()
-    if keys is None or pid != current_pid:
-        keys = set()
-        _palace_lock_holders.keys = keys
-        _palace_lock_holders.pid = current_pid
-    return keys
-
-
-def _held_by_this_thread(lock_key: str) -> bool:
-    """Return True if this thread already holds ``mine_dimension_lock`` for ``lock_key``."""
-    return lock_key in _holder_state()
-
-
-def _mark_held(lock_key: str) -> None:
-    _holder_state().add(lock_key)
-
-
-def _mark_released(lock_key: str) -> None:
-    _holder_state().discard(lock_key)
-
-
-def _format_lock_holder(content: str) -> str:
-    """Render a lock-file body as 'PID N (cmdline)' for diagnostic messages."""
-    parts = content.split(maxsplit=1)
-    if not parts or not parts[0].isdigit():
-        return "another writer (identity not recorded)"
-    pid = parts[0]
-    if len(parts) > 1 and parts[1].strip():
-        return f"PID {pid} ({parts[1].strip()})"
-    return f"PID {pid}"
-
-
-# Byte 0 of the lock file is reserved as the OS lock sentinel.
-_LOCK_SENTINEL_BYTES = 1
-
-
-def _read_lock_holder(lock_file) -> str:
-    """Read the prior holder's identity from the lock-file body, best-effort."""
-    try:
-        lock_file.seek(_LOCK_SENTINEL_BYTES)
-        content = lock_file.read()
-        if isinstance(content, bytes):
-            content = content.decode("utf-8", errors="replace")
-        content = content.strip()
-    except OSError:
-        return "another writer (identity not recorded)"
-    if not content:
-        return "another writer (identity not recorded)"
-    return _format_lock_holder(content)
-
-
-def _write_lock_holder(lock_file) -> None:
-    """Record this process's identity in the lock-file body. Best-effort.
-
-    Writes from byte 1 onward; byte 0 is the lock sentinel and must not
-    be touched after acquire (truncating it on Windows can interact
-    badly with the active byte-range lock).
-    """
-    try:
-        ident = f"{os.getpid()} {' '.join(sys.argv[:3])}".strip()
-        ident_bytes = ident.encode("utf-8")
-        lock_file.seek(_LOCK_SENTINEL_BYTES)
-        lock_file.truncate(_LOCK_SENTINEL_BYTES + len(ident_bytes))
-        lock_file.write(ident_bytes)
-        lock_file.flush()
-    except (OSError, UnicodeError):
-        pass
-
-
-@contextlib.contextmanager
-def mine_dimension_lock(dim_path: str):
-    """Per-dimension non-blocking lock around the full `mine` pipeline.
-
-    Non-blocking: if another `mine` is already writing to this dimension,
-    raises ``MineAlreadyRunning``. Re-entrant: same thread that holds the
-    lock on this dimension may call ``mine_*`` nested functions safely — the
-    context manager passes through without re-acquiring.
-    """
-    lock_dir = os.path.join(os.path.expanduser("~"), ".alt-memory", "locks")
-    os.makedirs(lock_dir, exist_ok=True)
-    resolved = os.path.realpath(os.path.expanduser(dim_path))
-    lock_key_source = os.path.normcase(resolved)
-    palace_key = hashlib.sha256(lock_key_source.encode()).hexdigest()[:16]
-    lock_path = os.path.join(lock_dir, f"mine_palace_{palace_key}.lock")
-
-    if _held_by_this_thread(palace_key):
-        yield
-        return
-
-    if not os.path.exists(lock_path):
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
-            os.close(fd)
-        except FileExistsError:
-            pass
-    lf = open(lock_path, "r+b")
-    acquired = False
-    try:
-        lf.seek(0)
-        if os.name == "nt":
-            import msvcrt
-
-            try:
-                msvcrt.locking(lf.fileno(), msvcrt.LK_NBLCK, 1)
-                acquired = True
-            except OSError as exc:
-                holder = _read_lock_holder(lf)
-                raise MineAlreadyRunning(
-                        f"dimension {resolved} is held by {holder}; "
-                        "wait for it to finish or stop the holder before retrying"
-                    ) from exc
-        else:
-            import fcntl
-            try:
-                fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-            except BlockingIOError as exc:
-                holder = _read_lock_holder(lf)
-                raise MineAlreadyRunning(
-                    f"dimension {resolved} is held by {holder}; "
-                    "wait for it to finish or stop the holder before retrying"
-                ) from exc
-        _write_lock_holder(lf)
-        _mark_held(palace_key)
-        try:
-            yield
-        finally:
-            _mark_released(palace_key)
-    finally:
-        if acquired:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-
-                    lf.seek(0)
-                    msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
-                else:
-                    import fcntl
-
-                    fcntl.flock(lf, fcntl.LOCK_UN)
-            except Exception:
-                pass
-        lf.close()
-
-
 # =============================================================================
 # SCAN FOR CONVERSATION FILES
 # =============================================================================
@@ -691,7 +521,7 @@ def _file_chunks_locked(dim, source_file, chunks, realm, domain, agent, extract_
                     {
                         "realm": realm,
                         "domain": chunk_domain,
-                        "hall": _detect_hall_cached(chunk["content"]),
+                        "gate": _detect_gate_cached(chunk["content"]),
                         "source_file": source_file,
                         "chunk_index": chunk["chunk_index"],
                         "added_by": agent,

@@ -1,6 +1,6 @@
 """fact_checker.py — Verify text against known facts in the dimension.
 
-Checks AI responses, diary entries, and new content against the entity
+Checks AI responses, record entries, and new content against the entity
 registry and knowledge graph for three classes of issue:
 
   * similar_name          — text mentions a name that's one/two edits

@@ -86,7 +86,7 @@ def _ask_mode() -> str:
     print("  How are you using Alt Memory?")
     print()
     print("    [1]  Work     — notes, projects, clients, colleagues, decisions")
-    print("    [2]  Personal — diary, family, health, relationships, reflections")
+    print("    [2]  Personal — record, family, health, relationships, reflections")
     print("    [3]  Both     — personal and professional mixed")
     print()
     while True:

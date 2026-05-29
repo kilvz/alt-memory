@@ -44,7 +44,7 @@ from alt_memory.dim_graph import (
     follow_tunnels,
     graph_stats,
 )
-from alt_memory.hallways import compute_hallways_for_realm
+from alt_memory.gateways import compute_gateways_for_realm
 from alt_memory.dynamics import (
     initialize_dynamics_fields, potentiate, apply_decay,
 )
@@ -107,7 +107,7 @@ __all__ = [
     "delete_tunnel",
     "follow_tunnels",
     "graph_stats",
-    "compute_hallways_for_realm",
+    "compute_gateways_for_realm",
     "initialize_dynamics_fields",
     "potentiate",
     "apply_decay",

@@ -6,9 +6,8 @@ when vectors are lost or corrupted.
 
 Schema versions
 ---------------
-v0 — unversioned dimension (pre-migrate): realms, domains, entities (with FTS5), nodes
-v1 — adds _meta version tracking table and content_date column to entities
-v2 — renames wings→realms, rooms→domains, drawers→entities in DB tables
+v0 — unversioned dimension (pre-migrate)
+v1 — current: adds _meta version tracking table and content_date column
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ from alt_memory.backends.embedder import get_embedder
 
 logger = logging.getLogger(__name__)
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 1
 META_TABLE = "_meta"
 
 
@@ -35,9 +34,7 @@ META_TABLE = "_meta"
 
 def _open_db(dim_path: str) -> sqlite3.Connection:
     base = Path(dim_path).expanduser().resolve()
-    dim_db = base / "dimension.db"
-    legacy_db = base / "palace.db"  # legacy filename from pre-rename era
-    db_path = str(dim_db) if dim_db.exists() else str(legacy_db)
+    db_path = str(base / "dimension.db")
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -57,12 +54,6 @@ def get_dimension_version(dim_path: str) -> int:
         _ensure_meta_table(conn)
         row = conn.execute(
             f"SELECT value FROM {META_TABLE} WHERE key='dimension_version'"
-        ).fetchone()
-        if row:
-            return int(row["value"])
-        # Fallback to legacy key
-        row = conn.execute(
-            f"SELECT value FROM {META_TABLE} WHERE key='palace_version'"
         ).fetchone()
         return int(row["value"]) if row else 0
     except (sqlite3.Error, ValueError):
@@ -92,51 +83,15 @@ def _migrate_v0_to_v1(dim_path: str, conn: sqlite3.Connection) -> None:
     _ensure_meta_table(conn)
     existing = {
         row["name"]
-        for row in conn.execute("PRAGMA table_info(drawers)").fetchall()
-    }
-    if "content_date" not in existing:
-        conn.execute("ALTER TABLE drawers ADD COLUMN content_date TEXT DEFAULT ''")
-        logger.info("migrate: added content_date column to drawers")
-
-
-def _migrate_v1_to_v2(dim_path: str, conn: sqlite3.Connection) -> None:
-    """v1 -> v2: rename wings→realms, rooms→domains, drawers→entities."""
-    existing_tables = {
-        row["name"]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-    }
-    table_renames = {"wings": "realms", "rooms": "domains", "drawers": "entities"}
-    for old, new in table_renames.items():
-        if old in existing_tables:
-            conn.execute(f"ALTER TABLE {old} RENAME TO {new}")
-            logger.info("migrate: renamed table %s → %s", old, new)
-
-    # Rename columns inside the new entities table
-    entities_cols = {
-        row["name"]
         for row in conn.execute("PRAGMA table_info(entities)").fetchall()
     }
-    if "wing" in entities_cols:
-        conn.execute("ALTER TABLE entities RENAME COLUMN wing TO realm")
-    if "room" in entities_cols:
-        conn.execute("ALTER TABLE entities RENAME COLUMN room TO domain")
-
-    # Migrate _meta key from palace_version to dimension_version
-    _ensure_meta_table(conn)
-    row = conn.execute(
-        f"SELECT value FROM {META_TABLE} WHERE key='palace_version'"
-    ).fetchone()
-    if row:
-        conn.execute(
-            f"INSERT OR REPLACE INTO {META_TABLE} (key, value) VALUES ('dimension_version', ?)",
-            (row["value"],),
-        )
-        conn.execute(f"DELETE FROM {META_TABLE} WHERE key='palace_version'")
+    if "content_date" not in existing:
+        conn.execute("ALTER TABLE entities ADD COLUMN content_date TEXT DEFAULT ''")
+        logger.info("migrate: added content_date column to entities")
 
 
 _MIGRATIONS = {
     1: _migrate_v0_to_v1,
-    2: _migrate_v1_to_v2,
 }
 
 
@@ -254,9 +209,7 @@ def migrate(dim_path: str, dry_run: bool = False, confirm: bool = False) -> dict
 def status(dim_path: str) -> dict:
     """Detailed schema-version status of the dimension."""
     base = Path(dim_path).expanduser().resolve()
-    dim_db = base / "dimension.db"
-    legacy_db = base / "palace.db"  # legacy filename from pre-rename era
-    dim_db_path = dim_db if dim_db.exists() else legacy_db
+    dim_db_path = base / "dimension.db"
     data_dir = base / "data"
     index_file = data_dir / "index.faiss"
     meta_file = data_dir / "metadata.db"

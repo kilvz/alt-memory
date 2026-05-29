@@ -194,7 +194,7 @@ def regenerate_nodes(
         for doc_id, doc, meta in zip(ids, batch["documents"], batch["metadatas"]):
             meta = meta or {}
             source = meta.get("source_file", "unknown")
-            w = meta.get("realm", meta.get("wing", ""))
+            w = meta.get("realm", "")
             if realm and w != realm:
                 continue
             if source not in by_source:
@@ -222,8 +222,8 @@ def regenerate_nodes(
         data = by_source[source]
         content = "\n\n".join(data["content"])
         meta = data["meta"]
-        w = meta.get("realm", meta.get("wing", ""))
-        r = meta.get("domain", meta.get("room", ""))
+        w = meta.get("realm", "")
+        r = meta.get("domain", "")
         entities = meta.get("entities", "")
 
         if dry_run:

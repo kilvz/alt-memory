@@ -1,0 +1,10 @@
+{"question_id": "e47becba", "question_type": "single-session-user", "metrics": {"recall_any@1": 0.0, "recall_any@3": 0.0, "recall_any@5": 0.0, "recall_any@10": 1.0, "recall_any@30": 1.0, "recall_any@50": 1.0}}
+{"question_id": "118b2229", "question_type": "single-session-user", "metrics": {"recall_any@1": 0.0, "recall_any@3": 0.0, "recall_any@5": 1.0, "recall_any@10": 1.0, "recall_any@30": 1.0, "recall_any@50": 1.0}}
+{"question_id": "51a45a95", "question_type": "single-session-user", "metrics": {"recall_any@1": 1.0, "recall_any@3": 1.0, "recall_any@5": 1.0, "recall_any@10": 1.0, "recall_any@30": 1.0, "recall_any@50": 1.0}}
+{"question_id": "58bf7951", "question_type": "single-session-user", "metrics": {"recall_any@1": 1.0, "recall_any@3": 1.0, "recall_any@5": 1.0, "recall_any@10": 1.0, "recall_any@30": 1.0, "recall_any@50": 1.0}}
+{"question_id": "1e043500", "question_type": "single-session-user", "metrics": {"recall_any@1": 1.0, "recall_any@3": 1.0, "recall_any@5": 1.0, "recall_any@10": 1.0, "recall_any@30": 1.0, "recall_any@50": 1.0}}
+{"question_id": "c5e8278d", "question_type": "single-session-user", "metrics": {"recall_any@1": 1.0, "recall_any@3": 1.0, "recall_any@5": 1.0, "recall_any@10": 1.0, "recall_any@30": 1.0, "recall_any@50": 1.0}}
+{"question_id": "6ade9755", "question_type": "single-session-user", "metrics": {"recall_any@1": 1.0, "recall_any@3": 1.0, "recall_any@5": 1.0, "recall_any@10": 1.0, "recall_any@30": 1.0, "recall_any@50": 1.0}}
+{"question_id": "6f9b354f", "question_type": "single-session-user", "metrics": {"recall_any@1": 1.0, "recall_any@3": 1.0, "recall_any@5": 1.0, "recall_any@10": 1.0, "recall_any@30": 1.0, "recall_any@50": 1.0}}
+{"question_id": "58ef2f1c", "question_type": "single-session-user", "metrics": {"recall_any@1": 1.0, "recall_any@3": 1.0, "recall_any@5": 1.0, "recall_any@10": 1.0, "recall_any@30": 1.0, "recall_any@50": 1.0}}
+{"question_id": "f8c5f88b", "question_type": "single-session-user", "metrics": {"recall_any@1": 1.0, "recall_any@3": 1.0, "recall_any@5": 1.0, "recall_any@10": 1.0, "recall_any@30": 1.0, "recall_any@50": 1.0}}

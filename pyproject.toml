@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alt-memory"
+version = "4.3.0"
+description = "FAISS-powered memory palace — wings, rooms, drawers, hybrid search, entity graph, MCP"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Alt Memory"},
+]
+dependencies = [
+    "faiss-cpu>=1.7.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+alt-memory = "alt_memory.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["alt_memory*"]
+
+[tool.setuptools.package-data]
+alt_memory = ["i18n/*.json"]

@@ -1,0 +1,1111 @@
+"""MCP (Model Context Protocol) server for Alt Memory.
+
+Exposes all Dimension operations as JSON-RPC tools over stdio or SSE transport.
+"""
+
+import json
+import logging
+import sys
+import traceback
+from typing import Any, Optional
+
+try:
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from urllib.parse import urlparse
+
+    HAS_HTTP = True
+except ImportError:
+    HAS_HTTP = False
+
+from alt_memory import dialect
+from alt_memory.dialect import aaak_compress, aaak_decompress, aaak_parse_entry
+from alt_memory.entity_registry import EntityRegistry
+from alt_memory import dim_graph
+from alt_memory.sync import sync_dimension
+from alt_memory.config import AltMemoryConfig
+
+try:
+    from alt_memory.layers import MemoryStack
+
+    HAS_LAYERS = True
+except ImportError:
+    HAS_LAYERS = False
+
+try:
+    from alt_memory import miner
+
+    HAS_MINER = True
+except ImportError:
+    HAS_MINER = False
+
+
+logger = logging.getLogger(__name__)
+
+VERSION = "4.2.0"
+MCP_PROTOCOL_VERSION = "2024-11-05"
+
+_TOOL_DEFINITIONS: list[dict] = []
+
+AAAK_SPEC = (
+    "AAAK is a compressed memory dialect that Alt Memory uses for efficient storage. "
+    "It is designed to be readable by both humans and LLMs without decoding.\n\n"
+    "FORMAT:\n"
+    "  ENTITIES: 3-letter uppercase codes. ALC=Alice, JOR=Jordan, RIL=Riley, MAX=Max, BEN=Ben.\n"
+    "  EMOTIONS: *action markers* before/during text. *warm*=joy, *fierce*=determined, *raw*=vulnerable, *bloom*=tenderness.\n"
+    "  STRUCTURE: Pipe-separated fields. FAM: family | PROJ: projects | ⚠: warnings/reminders.\n"
+    "  DATES: ISO format (2026-03-31). COUNTS: Nx = N mentions (e.g., 570x).\n"
+    "  IMPORTANCE: ★ to ★★★★★ (1-5 scale).\n"
+    "  HALLS: hall_facts, hall_events, hall_discoveries, hall_preferences, hall_advice.\n"
+    "  WINGS: alt_memory, documents, reference, benchmark, agent_*\n"
+    "  ROOMS: Hyphenated slugs representing named ideas (e.g., chromadb-setup, gpu-pricing).\n\n"
+    "EXAMPLE:\n"
+    "  FAM: ALC→♡JOR | 2D(kids): RIL(18,sports) MAX(11,chess+swimming) | BEN(contributor)\n\n"
+    "Read AAAK naturally — expand codes mentally, treat *markers* as emotional context.\n"
+    "When WRITING AAAK: use entity codes, mark emotions, keep structure tight."
+)
+
+
+def _build_tool_definitions() -> list[dict]:
+    """Build MCP tool definitions from the registered methods."""
+    if _TOOL_DEFINITIONS:
+        return _TOOL_DEFINITIONS
+    tools = [
+        {
+            "name": "search",
+            "description": "Search across all dimension entities using hybrid (vector+keyword), vector-only, or keyword-only mode",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query text"},
+                    "n_results": {"type": "number", "description": "Max results to return (default 10)"},
+                    "realm": {"type": "string", "description": "Restrict to a realm"},
+                    "domain": {"type": "string", "description": "Restrict to a domain"},
+                    "mode": {"type": "string", "description": "Search mode: hybrid, vector, or keyword"},
+                },
+                "required": ["query"],
+            },
+        },
+        {
+            "name": "get_status",
+            "description": "Get dimension status: entity count, realm/domain breakdown, embedding type",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "list_wings",
+            "description": "List all realms in the dimension",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "list_domains",
+            "description": "List domains in a realm",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "realm": {"type": "string", "description": "Realm name (optional; lists all domains if omitted)"},
+                },
+            },
+        },
+        {
+            "name": "add_entity",
+            "description": "Add a new entity with content to a realm/domain",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "realm": {"type": "string", "description": "Realm name"},
+                    "domain": {"type": "string", "description": "Domain name"},
+                    "content": {"type": "string", "description": "Entity content text"},
+                    "metadata": {"type": "object", "description": "Optional metadata dict"},
+                    "source_file": {"type": "string", "description": "Optional source file path"},
+                },
+                "required": ["realm", "domain", "content"],
+            },
+        },
+        {
+            "name": "get_entity",
+            "description": "Get an entity by its ID",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entity_id": {"type": "string", "description": "Entity ID"},
+                },
+                "required": ["entity_id"],
+            },
+        },
+        {
+            "name": "delete_entity",
+            "description": "Delete an entity by its ID",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entity_id": {"type": "string", "description": "Entity ID"},
+                },
+                "required": ["entity_id"],
+            },
+        },
+        {
+            "name": "kg_add",
+            "description": "Add a fact to the knowledge graph",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "description": "Subject entity"},
+                    "predicate": {"type": "string", "description": "Relationship type"},
+                    "object": {"type": "string", "description": "Object entity"},
+                    "valid_from": {"type": "string", "description": "ISO date when fact becomes valid"},
+                    "valid_to": {"type": "string", "description": "ISO date when fact expires"},
+                },
+                "required": ["subject", "predicate", "object"],
+            },
+        },
+        {
+            "name": "kg_query",
+            "description": "Query the knowledge graph for facts about an entity",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entity": {"type": "string", "description": "Entity name to query"},
+                    "predicate": {"type": "string", "description": "Filter by predicate"},
+                    "as_of": {"type": "string", "description": "ISO date to query temporally"},
+                    "all": {"type": "boolean", "description": "Return all facts"},
+                },
+            },
+        },
+        {
+            "name": "kg_invalidate",
+            "description": "Mark a knowledge graph fact as no longer true",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "description": "Subject entity"},
+                    "predicate": {"type": "string", "description": "Relationship type"},
+                    "object": {"type": "string", "description": "Object entity"},
+                },
+                "required": ["subject", "predicate", "object"],
+            },
+        },
+        {
+            "name": "kg_stats",
+            "description": "Get knowledge graph statistics",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "diary_write",
+            "description": "Write a diary entry for an agent",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Agent name"},
+                    "entry": {"type": "string", "description": "Diary entry text"},
+                    "topic": {"type": "string", "description": "Topic tag"},
+                },
+                "required": ["agent", "entry"],
+            },
+        },
+        {
+            "name": "diary_read",
+            "description": "Read recent diary entries for an agent",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent": {"type": "string", "description": "Agent name"},
+                    "last_n": {"type": "number", "description": "Number of entries to read"},
+                },
+                "required": ["agent"],
+            },
+        },
+        {
+            "name": "list_entities",
+            "description": "List entities with optional realm/domain filter and pagination",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "realm": {"type": "string", "description": "Filter by realm"},
+                    "domain": {"type": "string", "description": "Filter by domain"},
+                    "limit": {"type": "number", "description": "Max results (default 20)"},
+                    "offset": {"type": "number", "description": "Offset for pagination"},
+                },
+            },
+        },
+        {
+            "name": "mine_text",
+            "description": "Mine text content into the dimension",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text content to mine"},
+                    "realm": {"type": "string", "description": "Target realm"},
+                    "domain": {"type": "string", "description": "Target domain"},
+                    "source": {"type": "string", "description": "Optional source identifier"},
+                },
+                "required": ["text", "realm", "domain"],
+            },
+        },
+        {
+            "name": "aaak_compress",
+            "description": "Compress text using AAAK dialect",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Text to compress"},
+                },
+                "required": ["text"],
+            },
+        },
+        {
+            "name": "aaak_decompress",
+            "description": "Decompress AAAK-encoded text",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "AAAK text to decompress"},
+                },
+                "required": ["text"],
+            },
+        },
+        {
+            "name": "aaak_parse",
+            "description": "Parse a single AAAK entry into its components",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "AAAK entry text"},
+                },
+                "required": ["text"],
+            },
+        },
+    ]
+    _TOOL_DEFINITIONS.extend(tools)
+
+    # -- Additional tools --
+
+    extra_tools = [
+        {
+            "name": "update_entity",
+            "description": "Update an existing entity's content and/or metadata (realm, domain)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entity_id": {"type": "string", "description": "Entity ID"},
+                    "content": {"type": "string", "description": "New content (optional)"},
+                    "metadata": {"type": "object", "description": "New metadata (optional)"},
+                    "realm": {"type": "string", "description": "New realm (optional)"},
+                    "domain": {"type": "string", "description": "New domain (optional)"},
+                },
+                "required": ["entity_id"],
+            },
+        },
+        {
+            "name": "check_duplicate",
+            "description": "Check if content already exists in the dimension before filing",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Content to check"},
+                    "threshold": {"type": "number", "description": "Similarity threshold 0-1 (default 0.9)"},
+                },
+                "required": ["content"],
+            },
+        },
+        {
+            "name": "kg_timeline",
+            "description": "Chronological timeline of facts. Shows the story of an entity (or everything) in order.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entity": {"type": "string", "description": "Entity to get timeline for (optional — omit for full timeline)"},
+                },
+            },
+        },
+        {
+            "name": "create_tunnel",
+            "description": "Create a cross-realm tunnel linking two dimension locations",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_realm": {"type": "string", "description": "Realm of the source"},
+                    "source_domain": {"type": "string", "description": "Domain in the source realm"},
+                    "target_realm": {"type": "string", "description": "Realm of the target"},
+                    "target_domain": {"type": "string", "description": "Domain in the target realm"},
+                    "label": {"type": "string", "description": "Description of the connection"},
+                    "source_entity_id": {"type": "string", "description": "Optional specific entity ID"},
+                    "target_entity_id": {"type": "string", "description": "Optional specific entity ID"},
+                },
+                "required": ["source_realm", "source_domain", "target_realm", "target_domain"],
+            },
+        },
+        {
+            "name": "delete_tunnel",
+            "description": "Delete an explicit tunnel by its entity ID",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "tunnel_id": {"type": "string", "description": "Tunnel ID to delete"},
+                },
+                "required": ["tunnel_id"],
+            },
+        },
+        {
+            "name": "find_tunnels",
+            "description": "Find domains that bridge two realms — the hallways connecting different domains",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "realm_a": {"type": "string", "description": "First realm (optional)"},
+                    "realm_b": {"type": "string", "description": "Second realm (optional)"},
+                },
+            },
+        },
+        {
+            "name": "follow_tunnels",
+            "description": "Follow tunnels from a domain to see what it connects to in other realms",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "realm": {"type": "string", "description": "Realm to start from"},
+                    "domain": {"type": "string", "description": "Domain to follow tunnels from"},
+                },
+                "required": ["realm", "domain"],
+            },
+        },
+        {
+            "name": "list_tunnels",
+            "description": "List all explicit cross-realm tunnels. Optionally filter by realm.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "realm": {"type": "string", "description": "Filter tunnels by realm"},
+                },
+            },
+        },
+        {
+            "name": "traverse",
+            "description": "Walk the dimension graph from a domain. Shows connected ideas across realms.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "start_domain": {"type": "string", "description": "Domain to start from"},
+                    "max_hops": {"type": "number", "description": "How many connections to follow (default: 2)"},
+                },
+                "required": ["start_domain"],
+            },
+        },
+        {
+            "name": "graph_stats",
+            "description": "Dimension graph overview: total domains, tunnel connections, edges between realms.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "get_taxonomy",
+            "description": "Full taxonomy: realm → domain → entity count",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "get_aaak_spec",
+            "description": "Get the AAAK dialect specification — the compressed memory format",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "memories_filed_away",
+            "description": "Check if a recent dimension checkpoint was saved. Returns entity count and timestamp.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "sync",
+            "description": "Prune entities whose source files are gitignored, deleted, or moved",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project_dir": {"type": "string", "description": "Project root to scope the sync"},
+                    "realm": {"type": "string", "description": "Limit to one realm"},
+                    "apply": {"type": "boolean", "description": "Actually delete entities; default is dry-run preview"},
+                },
+            },
+        },
+        {
+            "name": "reconnect",
+            "description": "Force reconnect to the dimension database. Use after external changes.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "hook_settings",
+            "description": "Get or set hook behavior. silent_save: True = save directly, desktop_toast: True = show notification.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "silent_save": {"type": "boolean", "description": "True = silent direct save"},
+                    "desktop_toast": {"type": "boolean", "description": "True = show desktop toast via notify-send"},
+                },
+            },
+        },
+        {
+            "name": "mine_file",
+            "description": "Mine a single file into the dimension (chunks, extracts metadata, stores entities)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string", "description": "Path to the file to mine"},
+                    "realm": {"type": "string", "description": "Target realm"},
+                    "domain": {"type": "string", "description": "Target domain"},
+                },
+                "required": ["filepath", "realm", "domain"],
+            },
+        },
+        {
+            "name": "batch_mine",
+            "description": "Mine all matching files in a directory into the dimension",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "directory": {"type": "string", "description": "Directory to scan for files"},
+                    "realm": {"type": "string", "description": "Target realm (optional; auto-detected from dir name)"},
+                    "pattern": {"type": "string", "description": "Glob pattern to filter files (e.g. *.md, *.txt)"},
+                },
+                "required": ["directory"],
+            },
+        },
+        {
+            "name": "rebuild_fts",
+            "description": "Rebuild the FTS5 full-text search index from all entity contents",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "set_embedder",
+            "description": "Switch to a different embedding model and optionally reindex all entities",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "model": {"type": "string", "description": "Embedder name: sentence, spacy, numpy, minilm, embeddinggemma"},
+                    "device": {"type": "string", "description": "ONNX device: auto, cpu, cuda, coreml, dml (default from config)"},
+                    "reindex": {"type": "boolean", "description": "Re-embed all existing drawers (default true)"},
+                },
+                "required": ["model"],
+            },
+        },
+        {
+            "name": "get_default_embedder",
+            "description": "Get the default embedder model for new dimensions (global config)",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "set_default_embedder",
+            "description": "Set the default embedder model for new dimensions (global config ~/.alt-memory/config.json)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "model": {
+                        "type": "string",
+                        "description": "Embedder name: sentence, spacy, numpy, minilm, embeddinggemma",
+                        "enum": ["sentence", "spacy", "numpy", "minilm", "embeddinggemma"],
+                    },
+                },
+                "required": ["model"],
+            },
+        },
+        {
+            "name": "list_agents",
+            "description": "List all agent diary writers in the dimension",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "get_people_map",
+            "description": "Get the people map (name variant to canonical name mappings)",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "set_people_map",
+            "description": "Set the people map (name variant to canonical name mappings)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "map": {
+                        "type": "object",
+                        "description": "Mapping of name variants to canonical names, e.g. {\"Alex\": \"Alexander\"}",
+                    },
+                },
+                "required": ["map"],
+            },
+        },
+    ]
+    _TOOL_DEFINITIONS.extend(extra_tools)
+    return _TOOL_DEFINITIONS
+
+
+class MCPServer:
+    """JSON-RPC MCP server dispatching to Dimension operations."""
+
+    def __init__(self, dim: "Dimension"):
+        self.dim = dim
+        self.entity_registry = EntityRegistry(dim)
+        self.memory_stack = MemoryStack(dim) if HAS_LAYERS else None
+
+        self._methods: dict[str, tuple] = {}
+        self._register_all()
+
+    def _register(self, name: str, handler: callable, required: list[str] | None = None):
+        self._methods[name] = (handler, required or [])
+
+    def _register_all(self):
+        # MCP protocol methods
+        self._register("initialize", self._mcp_initialize, [])
+        self._register("notifications/initialized", self._mcp_noop, [])
+        self._register("notifications/notified", self._mcp_noop, [])
+        self._register("tools/list", self._mcp_tools_list, [])
+        self._register("tools/call", self._mcp_tools_call, ["name", "arguments"])
+
+        # Legacy JSON-RPC methods
+        self._register("ping", self._ping, [])
+        self._register("get_status", self._get_status, [])
+        self._register("init_dimension", self._init_dimension, [])
+        self._register("close_dimension", self._close_dimension, [])
+
+        self._register("list_wings", self._list_wings, [])
+        self._register("create_wing", self._create_wing, ["name"])
+        self._register("delete_wing", self._delete_wing, ["name"])
+
+        self._register("list_domains", self._list_domains, [])
+        self._register("create_domain", self._create_domain, ["realm", "name"])
+        self._register("delete_domain", self._delete_domain, ["realm", "name"])
+
+        self._register("add_entity", self._add_entity, ["realm", "domain", "content"])
+        self._register("get_entity", self._get_entity, ["entity_id"])
+        self._register("list_entities", self._list_entities, [])
+        self._register("update_entity", self._update_entity, ["entity_id"])
+        self._register("delete_entity", self._delete_entity, ["entity_id"])
+
+        self._register("search", self._search, ["query"])
+        self._register("check_duplicate", self._check_duplicate, ["content"])
+
+        self._register("kg_add", self._kg_add, ["subject", "predicate", "object"])
+        self._register("kg_query", self._kg_query, [])
+        self._register("kg_invalidate", self._kg_invalidate, ["subject", "predicate", "object"])
+        self._register("kg_stats", self._kg_stats, [])
+        self._register("kg_timeline", self._kg_timeline, [])
+
+        self._register("diary_write", self._diary_write, ["agent", "entry"])
+        self._register("diary_read", self._diary_read, ["agent"])
+        self._register("memory_write", self._memory_write, ["agent", "layer", "content"])
+        self._register("memory_read", self._memory_read, ["agent"])
+        self._register("memory_summarize", self._memory_summarize, ["agent"])
+
+        self._register("mine_file", self._mine_file, ["filepath", "realm", "domain"])
+        self._register("mine_text", self._mine_text, ["text", "realm", "domain"])
+        self._register("batch_mine", self._batch_mine, ["directory"])
+
+        self._register("aaak_compress", self._aaak_compress, ["text"])
+        self._register("aaak_decompress", self._aaak_decompress, ["text"])
+        self._register("aaak_parse", self._aaak_parse, ["text"])
+
+        self._register("rebuild_fts", self._rebuild_fts, [])
+
+        # New tools
+        self._register("create_tunnel", self._create_tunnel, ["source_realm", "source_domain", "target_realm", "target_domain"])
+        self._register("delete_tunnel", self._delete_tunnel, ["tunnel_id"])
+        self._register("find_tunnels", self._find_tunnels, [])
+        self._register("follow_tunnels", self._follow_tunnels, ["realm", "domain"])
+        self._register("list_tunnels", self._list_tunnels, [])
+        self._register("traverse", self._traverse, ["start_domain"])
+        self._register("graph_stats", self._graph_stats, [])
+        self._register("get_taxonomy", self._get_taxonomy, [])
+        self._register("get_aaak_spec", self._get_aaak_spec, [])
+        self._register("memories_filed_away", self._memories_filed_away, [])
+        self._register("sync", self._sync, [])
+        self._register("reconnect", self._reconnect, [])
+        self._register("hook_settings", self._hook_settings, [])
+        self._register("set_embedder", self._set_embedder, ["model"])
+        self._register("get_default_embedder", self._get_default_embedder, [])
+        self._register("set_default_embedder", self._set_default_embedder, ["model"])
+        self._register("list_agents", self._list_agents, [])
+        self._register("get_people_map", self._get_people_map, [])
+        self._register("set_people_map", self._set_people_map, [])
+
+    def handle_request(self, raw: str) -> str | None:
+        """Process one JSON-RPC request line, return JSON response string.
+        Returns None for notifications (no ``id`` field).
+        """
+        try:
+            req = json.loads(raw)
+        except json.JSONDecodeError:
+            return json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error: invalid JSON"}})
+
+        req_id = req.get("id")
+        method = req.get("method", "")
+        params = req.get("params", {})
+
+        if not isinstance(params, dict):
+            err = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": "Params must be a JSON object"}}
+            return json.dumps(err)
+
+        handler_info = self._methods.get(method)
+        if handler_info is None:
+            err = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Method not found: {method}"}}
+            return json.dumps(err)
+
+        handler, required = handler_info
+        missing = [p for p in required if p not in params or params[p] is None or (isinstance(params[p], str) and not params[p].strip())]
+        if missing:
+            err = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": f"Missing required parameter(s): {', '.join(missing)}"}}
+            return json.dumps(err)
+
+        try:
+            result = handler(params)
+            if req_id is None:
+                return None
+            return json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result})
+        except Exception as e:
+            logger.exception("Error handling %s: %s", method, e)
+            err = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32603, "message": str(e)}}
+            if logger.isEnabledFor(logging.DEBUG):
+                err["error"]["data"] = traceback.format_exc()
+            return json.dumps(err)
+
+    # -- MCP protocol handlers ---------------------------------------------------
+
+    def _mcp_initialize(self, params: dict) -> dict:
+        return {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "alt-memory", "version": VERSION},
+        }
+
+    def _mcp_noop(self, params: dict) -> dict:
+        return {}
+
+    def _mcp_tools_list(self, params: dict) -> dict:
+        return {"tools": _build_tool_definitions()}
+
+    def _mcp_tools_call(self, params: dict) -> dict:
+        name = params["name"]
+        args = params.get("arguments", {})
+        handler_info = self._methods.get(name)
+        if handler_info is None:
+            raise ValueError(f"Unknown tool: {name}")
+        handler, required = handler_info
+        result = handler(args)
+        text = json.dumps(result, indent=2, ensure_ascii=False) if not isinstance(result, str) else str(result)
+        return {"content": [{"type": "text", "text": text}]}
+
+    # -- Handler implementations ------------------------------------------------
+
+    def _ping(self, params: dict) -> dict:
+        return {"pong": True, "version": VERSION}
+
+    def _get_status(self, params: dict) -> dict:
+        return self.dim.status()
+
+    def _init_dimension(self, params: dict) -> dict:
+        return {"created": self.dim.init()}
+
+    def _close_dimension(self, params: dict) -> dict:
+        self.dim.close()
+        return {"closed": True}
+
+    def _list_wings(self, params: dict) -> list:
+        return self.dim.list_realms()
+
+    def _create_wing(self, params: dict) -> dict:
+        name = self.dim.get_or_create_realm(params["name"], params.get("description", ""))
+        return {"name": name}
+
+    def _delete_wing(self, params: dict) -> dict:
+        return {"deleted": self.dim.delete_realm(params["name"])}
+
+    def _list_domains(self, params: dict) -> list:
+        return self.dim.list_domains(realm=params.get("realm"))
+
+    def _create_domain(self, params: dict) -> dict:
+        name = self.dim.get_or_create_domain(params["realm"], params["name"], params.get("description", ""))
+        return {"name": name}
+
+    def _delete_domain(self, params: dict) -> dict:
+        return {"deleted": self.dim.delete_domain(params["realm"], params["name"])}
+
+    def _add_entity(self, params: dict) -> dict:
+        did = self.dim.add_entity(
+            params["realm"],
+            params["domain"],
+            params["content"],
+            metadata=params.get("metadata"),
+            source_file=params.get("source_file", ""),
+            entity_id=params.get("entity_id"),
+        )
+        return {"entity_id": did}
+
+    def _get_entity(self, params: dict) -> dict | None:
+        drawer = self.dim.get_entity(params["entity_id"])
+        if drawer is None:
+            return {"found": False}
+        return drawer
+
+    def _list_entities(self, params: dict) -> list:
+        return self.dim.list_entities(
+            realm=params.get("realm"),
+            domain=params.get("domain"),
+            limit=params.get("limit", 20),
+            offset=params.get("offset", 0),
+        )
+
+    def _update_entity(self, params: dict) -> dict:
+        ok = self.dim.update_entity(
+            params["entity_id"],
+            content=params.get("content"),
+            metadata=params.get("metadata"),
+            realm=params.get("realm"),
+            domain=params.get("domain"),
+        )
+        return {"updated": ok}
+
+    def _delete_entity(self, params: dict) -> dict:
+        return {"deleted": self.dim.delete_entity(params["entity_id"])}
+
+    def _search(self, params: dict) -> list:
+        results = self.dim.search(
+            params["query"],
+            n_results=params.get("n_results", 10),
+            realm=params.get("realm"),
+            domain=params.get("domain"),
+            mode=params.get("mode", "hybrid"),
+        )
+        return [
+            {
+                "id": r.id,
+                "text": r.text,
+                "distance": r.distance,
+                "metadata": r.metadata,
+                "realm": r.realm,
+                "domain": r.domain,
+            }
+            for r in results
+        ]
+
+    def _check_duplicate(self, params: dict) -> dict:
+        dup = self.dim.check_duplicate(params["content"], threshold=params.get("threshold", 0.9))
+        if dup:
+            return dup
+        return {"duplicate": False}
+
+    def _kg_add(self, params: dict) -> dict:
+        fid = self.dim.kg.add(
+            params["subject"],
+            params["predicate"],
+            params["object"],
+            valid_from=params.get("valid_from"),
+            valid_to=params.get("valid_to"),
+            source=params.get("source", ""),
+        )
+        return {"fact_id": fid}
+
+    def _kg_query(self, params: dict) -> list:
+        if params.get("all"):
+            return self.dim.kg.query(as_of=params.get("as_of"))
+        return self.dim.kg.query(
+            entity=params.get("entity"),
+            predicate=params.get("predicate"),
+            as_of=params.get("as_of"),
+            direction=params.get("direction", "both"),
+        )
+
+    def _kg_invalidate(self, params: dict) -> dict:
+        n = self.dim.kg.invalidate(
+            params["subject"],
+            params["predicate"],
+            params["object"],
+            ended=params.get("ended"),
+        )
+        return {"invalidated": n}
+
+    def _kg_stats(self, params: dict) -> dict:
+        return self.dim.kg.stats()
+
+    def _diary_write(self, params: dict) -> dict:
+        wing = self.dim.diary_write(
+            params["agent"],
+            params["entry"],
+            topic=params.get("topic", "general"),
+            realm=params.get("realm", ""),
+        )
+        return {"realm": wing}
+
+    def _diary_read(self, params: dict) -> list:
+        return self.dim.diary_read(
+            params["agent"],
+            last_n=params.get("last_n", 10),
+            realm=params.get("realm", ""),
+        )
+
+    def _memory_write(self, params: dict) -> Any:
+        self._require_layers()
+        return self.memory_stack.write(
+            params["agent"],
+            params["layer"],
+            params["content"],
+            topic=params.get("topic"),
+            metadata=params.get("metadata"),
+        )
+
+    def _memory_read(self, params: dict) -> list:
+        self._require_layers()
+        return self.memory_stack.read(
+            params["agent"],
+            layer=params.get("layer"),
+            last_n=params.get("last_n", 10),
+        )
+
+    def _memory_summarize(self, params: dict) -> dict:
+        self._require_layers()
+        return self.memory_stack.summarize(params["agent"])
+
+    def _mine_file(self, params: dict) -> dict:
+        self._require_miner()
+        count = miner.mine_file_into_dimension(
+            self.dim, params["filepath"], params["realm"], params["domain"],
+        )
+        return {"items_mined": count}
+
+    def _mine_text(self, params: dict) -> Any:
+        self._require_miner()
+        return miner.mine_text_into_dimension(
+            self.dim,
+            params["text"],
+            params["realm"],
+            params["domain"],
+            source=params.get("source"),
+            chunk=params.get("chunk", True),
+        )
+
+    def _batch_mine(self, params: dict) -> dict:
+        self._require_miner()
+        count = miner.batch_mine(
+            self.dim,
+            params["directory"],
+            realm=params.get("realm"),
+            pattern=params.get("pattern"),
+        )
+        return {"items_mined": count}
+
+    def _aaak_compress(self, params: dict) -> str:
+        return aaak_compress(params["text"], max_len=params.get("max_len", 500))
+
+    def _aaak_decompress(self, params: dict) -> str:
+        return aaak_decompress(params["text"])
+
+    def _aaak_parse(self, params: dict) -> dict:
+        return aaak_parse_entry(params["text"])
+
+    def _rebuild_fts(self, params: dict) -> dict:
+        self.dim.rebuild_fts()
+        return {"rebuilt": True}
+
+    def _kg_timeline(self, params: dict) -> list:
+        return self.dim.kg.timeline(entity=params.get("entity"))
+
+    def _create_tunnel(self, params: dict) -> dict:
+        tunnel = dim_graph.create_tunnel(
+            source_realm=params.get("source_wing", params.get("source_realm", "")),
+            source_domain=params.get("source_room", params.get("source_domain", "")),
+            target_realm=params.get("target_wing", params.get("target_realm", "")),
+            target_domain=params.get("target_room", params.get("target_domain", "")),
+            label=params.get("label", ""),
+            dimension=self.dim,
+            source_entity_id=params.get("source_entity_id"),
+            target_entity_id=params.get("target_entity_id"),
+        )
+        return tunnel
+
+    def _delete_tunnel(self, params: dict) -> dict:
+        return dim_graph.delete_tunnel(params["tunnel_id"], dimension=self.dim)
+
+    def _list_tunnels(self, params: dict) -> list:
+        return dim_graph.list_tunnels(realm=params.get("realm"), dimension=self.dim)
+
+    def _traverse(self, params: dict) -> list:
+        return dim_graph.traverse(
+            start_domain=params.get("start_room", params.get("start_domain", "")),
+            dimension=self.dim,
+            max_hops=params.get("max_hops", 2),
+        )
+
+    def _find_tunnels(self, params: dict) -> list:
+        return dim_graph.find_tunnels(
+            realm_a=params.get("realm_a", params.get("wing_a")),
+            realm_b=params.get("realm_b", params.get("wing_b")),
+            dimension=self.dim,
+        )
+
+    def _follow_tunnels(self, params: dict) -> list:
+        return dim_graph.follow_tunnels(
+            params["realm"],
+            params["domain"],
+            dimension=self.dim,
+        )
+
+    def _graph_stats(self, params: dict) -> dict:
+        return dim_graph.graph_stats(dimension=self.dim)
+
+    def _get_taxonomy(self, params: dict) -> dict:
+        return self.dim.get_taxonomy()
+
+    def _get_aaak_spec(self, params: dict) -> str:
+        return AAAK_SPEC
+
+    def _memories_filed_away(self, params: dict) -> dict:
+        return self.dim.memories_filed_away()
+
+    def _sync(self, params: dict) -> dict:
+        project_dirs = [params["project_dir"]] if params.get("project_dir") else None
+        report = sync_dimension(
+            dim_path=self.dim._base,
+            project_dirs=project_dirs,
+            realm=params.get("realm"),
+            dry_run=not params.get("apply", False),
+        )
+        return dict(report)
+
+    def _reconnect(self, params: dict) -> dict:
+        ok = self.dim.reconnect()
+        return {"reconnected": ok}
+
+    def _hook_settings(self, params: dict) -> dict:
+        config = AltMemoryConfig()
+        if params:
+            return config.set_hook_settings(
+                silent_save=params.get("silent_save"),
+                desktop_toast=params.get("desktop_toast"),
+            )
+        return config.get_hook_settings()
+
+    def _set_embedder(self, params: dict) -> dict:
+        return self.dim.set_embedder(
+            model=params["model"],
+            device=params.get("device"),
+            reindex=params.get("reindex", True),
+        )
+
+    def _get_default_embedder(self, params: dict) -> dict:
+        from alt_memory.config import AltMemoryConfig
+        return {"default_embedder": AltMemoryConfig().default_embedder}
+
+    def _set_default_embedder(self, params: dict) -> dict:
+        from alt_memory.config import AltMemoryConfig
+        model = AltMemoryConfig().set_default_embedder(params["model"])
+        return {"default_embedder": model}
+
+    def _list_agents(self, params: dict) -> list:
+        """Discover agent diary writers by scanning agent_* realms."""
+        agents = []
+        for realm in self.dim.list_realms():
+            name = realm.get("name", "")
+            if name.startswith("agent_"):
+                agents.append(name[len("agent_"):])
+        return sorted(agents)
+
+    def _get_people_map(self, params: dict) -> dict:
+        from alt_memory.config import AltMemoryConfig
+        return AltMemoryConfig().people_map
+
+    def _set_people_map(self, params: dict) -> dict:
+        from alt_memory.config import AltMemoryConfig
+        AltMemoryConfig().save_people_map(params.get("map", {}))
+        return {"saved": True}
+
+    # -- Helpers ----------------------------------------------------------------
+
+    def _require_layers(self):
+        if not HAS_LAYERS or self.memory_stack is None:
+            raise RuntimeError("MemoryStack not available (alt_memory.layers not installed)")
+
+    def _require_miner(self):
+        if not HAS_MINER:
+            raise RuntimeError("Miner not available (alt_memory.miner not installed)")
+
+
+# -- Transports ----------------------------------------------------------------
+
+
+def _stdio_server(server: MCPServer) -> None:
+    """Read JSON-RPC lines from stdin, write response lines to stdout."""
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        response = server.handle_request(line)
+        if response is not None:
+            sys.stdout.write(response + "\n")
+            sys.stdout.flush()
+
+
+if HAS_HTTP:
+
+    class _MCPHTTPHandler(BaseHTTPRequestHandler):
+        server_instance: MCPServer = None  # type: ignore[assignment]
+
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            if parsed.path == "/health":
+                self._send_json(200, {"status": "ok", "version": VERSION})
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_POST(self):
+            parsed = urlparse(self.path)
+            if parsed.path != "/mcp":
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8") if content_length else "{}"
+
+            response = self.server_instance.handle_request(body)
+            if response is None:
+                response = json.dumps({"jsonrpc": "2.0", "id": None, "result": None})
+            self._send_json(200, response)
+
+        def _send_json(self, status: int, data):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            if isinstance(data, str):
+                self.wfile.write(data.encode("utf-8"))
+            else:
+                self.wfile.write(json.dumps(data).encode("utf-8"))
+
+        def log_message(self, fmt, *args):
+            logger.debug("HTTP: " + fmt, *args)
+
+    def _sse_server(server: MCPServer, host: str, port: int) -> None:
+        _MCPHTTPHandler.server_instance = server
+        httpd = HTTPServer((host, port), _MCPHTTPHandler)
+        logger.info("MCP SSE server listening on http://%s:%d", host, port)
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            httpd.shutdown()
+
+
+def run_server(dim: "Dimension", host: str = "127.0.0.1", port: int = 8316,
+               transport: str = "stdio") -> None:
+    """Run the MCP server.
+
+    Parameters
+    ----------
+    dim : Dimension
+        Initialized Dimension instance.
+    host : str
+        Bind address for SSE transport (default ``127.0.0.1``).
+    port : int
+        Port for SSE transport (default ``8316``).
+    transport : str
+        ``"stdio"`` (read/write JSON-RPC on stdin/stdout) or
+        ``"sse"`` (HTTP server with ``GET /health`` and ``POST /mcp``).
+    """
+    server = MCPServer(dim)
+
+    if transport == "stdio":
+        _stdio_server(server)
+    elif transport == "sse":
+        if not HAS_HTTP:
+            raise RuntimeError("http.server not available on this platform")
+        _sse_server(server, host, port)
+    else:
+        raise ValueError(f"Unknown transport: {transport!r}")

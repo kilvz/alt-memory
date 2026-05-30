@@ -89,8 +89,7 @@ def dedup_source_group(dimension, entity_ids, threshold=DEFAULT_THRESHOLD, dry_r
             kept.append((eid, doc["content"]))
 
     if to_delete and not dry_run:
-        for eid in to_delete:
-            dimension.delete_entity(eid)
+        dimension.delete_entities(to_delete)
 
     return [k[0] for k in kept], to_delete
 

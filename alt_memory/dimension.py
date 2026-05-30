@@ -382,6 +382,9 @@ class Dimension:
         Persists to ``dimension.json``, closes the old store, and creates
         a new one. When ``reindex=True``, all existing entities are
         re-embedded into the new store.
+
+        The store swap is guarded by ``self._lock`` so concurrent
+        search operations see a consistent store reference.
         """
         valid = {"faiss", "chroma"}
         if backend not in valid:
@@ -390,28 +393,29 @@ class Dimension:
         if backend == self._backend:
             return {"backend": backend, "reindexed": 0, "note": "already active"}
 
-        old_backend = self._backend
-        self._backend = backend
+        with self._lock:
+            old_backend = self._backend
+            self._backend = backend
 
-        config_path = self._base / "dimension.json"
-        config = {}
-        if config_path.exists():
-            with open(config_path) as f:
-                config = json.load(f)
-        config["backend"] = backend
-        with open(config_path, "w") as f:
-            json.dump(config, f)
+            config_path = self._base / "dimension.json"
+            config = {}
+            if config_path.exists():
+                with open(config_path) as f:
+                    config = json.load(f)
+            config["backend"] = backend
+            with open(config_path, "w") as f:
+                json.dump(config, f)
 
-        info = {"backend": backend, "previous_backend": old_backend}
+            info = {"backend": backend, "previous_backend": old_backend}
 
-        if reindex:
-            count = self._reindex_embeddings()
-            info["reindexed"] = count
-        else:
-            if self._store:
-                self._store.close()
-            self._store = self._create_store()
-            info["reindexed"] = 0
+            if reindex:
+                count = self._reindex_embeddings()
+                info["reindexed"] = count
+            else:
+                if self._store:
+                    self._store.close()
+                self._store = self._create_store()
+                info["reindexed"] = 0
 
         return info
 
@@ -751,7 +755,6 @@ class Dimension:
             )
             self._db.commit()
 
-        self._save_embedder()
         logger.debug("batch_add_entities: added %d entities", len(ids))
         return ids
 
@@ -1352,6 +1355,9 @@ class Dimension:
 
         When ``reindex=True``, all existing entities are re-embedded with
         the new model and the FAISS index is rebuilt.
+
+        The embedder swap is guarded by ``self._lock`` so concurrent
+        search operations see a consistent embedder reference.
         """
         config_name = self._EMBEDDER_CONFIG_NAMES.get(model)
         if config_name is None:
@@ -1361,32 +1367,33 @@ class Dimension:
                 f"Valid options: {valid}"
             )
 
-        # Write new config
-        config_path = self._base / "dimension.json"
-        config = {}
-        if config_path.exists():
-            with open(config_path) as f:
-                config = json.load(f)
-        config["embedding"] = config_name
-        with open(config_path, "w") as f:
-            json.dump(config, f)
+        with self._lock:
+            # Write new config
+            config_path = self._base / "dimension.json"
+            config = {}
+            if config_path.exists():
+                with open(config_path) as f:
+                    config = json.load(f)
+            config["embedding"] = config_name
+            with open(config_path, "w") as f:
+                json.dump(config, f)
 
-        # Load new embedder
-        self._embedder = self._load_embedder(device=device)
+            # Load new embedder
+            self._embedder = self._load_embedder(device=device)
 
-        info = {
-            "model": config_name,
-            "dimension": self._embedder.dimension,
-        }
+            info = {
+                "model": config_name,
+                "dimension": self._embedder.dimension,
+            }
 
-        if reindex:
-            count = self._reindex_embeddings()
-            info["reindexed"] = count
-        else:
-            logger.warning(
-                "set_embedder(reindex=False): embedder changed without reindexing; "
-                "existing vectors will be mismatched with the new model"
-            )
+            if reindex:
+                count = self._reindex_embeddings()
+                info["reindexed"] = count
+            else:
+                logger.warning(
+                    "set_embedder(reindex=False): embedder changed without reindexing; "
+                    "existing vectors will be mismatched with the new model"
+                )
 
         return info
 

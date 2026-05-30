@@ -14,6 +14,10 @@ MAX_NAME_LENGTH = 128
 _SAFE_NAME_RE = re.compile(r"^(?:[^\W_]|[^\W_][\w .'-]{0,126}[^\W_])$")
 _LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
 
+# Cache config.json contents so AltMemoryConfig() doesn't read disk 24× per session.
+_CONFIG_FILE_CACHE: dict[str, dict] = {}
+_CONFIG_FILE_MTIME: dict[str, float] = {}
+
 
 def strip_lone_surrogates(text: str) -> str:
     return _LONE_SURROGATE_RE.sub("\ufffd", text)
@@ -146,14 +150,33 @@ class AltMemoryConfig:
             Path(config_dir) if config_dir else Path(os.path.expanduser("~/.alt-memory"))
         )
         self._config_file = self._config_dir / "config.json"
-        self._file_config = {}
 
+        cache_key = str(self._config_file)
+        if cache_key in _CONFIG_FILE_CACHE:
+            try:
+                current_mtime = self._config_file.stat().st_mtime
+            except OSError:
+                current_mtime = 0.0
+            cached_mtime = _CONFIG_FILE_MTIME.get(cache_key, 0.0)
+            if current_mtime == cached_mtime:
+                self._file_config = _CONFIG_FILE_CACHE[cache_key]
+                return
+            # File was modified externally; invalidate cache
+            _CONFIG_FILE_CACHE.pop(cache_key, None)
+            _CONFIG_FILE_MTIME.pop(cache_key, None)
+
+        self._file_config = {}
         if self._config_file.exists():
             try:
                 with open(self._config_file, "r") as f:
                     self._file_config = json.load(f)
             except (json.JSONDecodeError, OSError):
                 self._file_config = {}
+        _CONFIG_FILE_CACHE[cache_key] = self._file_config
+        try:
+            _CONFIG_FILE_MTIME[cache_key] = self._config_file.stat().st_mtime
+        except OSError:
+            _CONFIG_FILE_MTIME[cache_key] = 0.0
 
     @property
     def dim_path(self):

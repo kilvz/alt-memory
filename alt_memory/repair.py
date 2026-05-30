@@ -384,6 +384,7 @@ def rebuild_index(
         print(f"  Vectors before rebuild: {before:,}")
 
         store._rebuild_index()
+        store._save()
         after = store.count()
 
         print(f"  Vectors after rebuild: {after:,}")

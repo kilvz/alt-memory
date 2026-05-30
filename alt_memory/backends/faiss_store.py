@@ -29,7 +29,7 @@ def _sql_val(v):
     return str(v)
 
 
-from alt_memory.backends.base import DEFAULT_DIM
+from alt_memory.backends.types import DEFAULT_DIM
 
 
 class FaissStore:
@@ -64,6 +64,11 @@ class FaissStore:
         self._seq_path = self.path / "seq.txt"
         self._seq = self._load_seq()
 
+        # Dirty flag defers full FAISS index writes until flush/close.
+        # SQLite commits on every mutation (crash-safe); the FAISS index
+        # is rebuilt from SQLite vectors on restart if the file is stale.
+        self._faiss_dirty = False
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -78,6 +83,7 @@ class FaissStore:
             faiss_ids = self._alloc_faiss_ids(len(ids))
             self.index.add_with_ids(embeddings, faiss_ids)
             self._write_docs(ids, texts, metadatas, embeddings, faiss_ids)
+            self._faiss_dirty = True
             self._save()
 
     def upsert(self, ids: list[str], texts: list[str], metadatas: list[dict],
@@ -93,6 +99,7 @@ class FaissStore:
             faiss_ids = self._alloc_faiss_ids(len(ids))
             self.index.add_with_ids(embeddings, faiss_ids)
             self._write_docs(ids, texts, metadatas, embeddings, faiss_ids)
+            self._faiss_dirty = True
             self._save()
 
     def search(self, query_emb: np.ndarray, n_results: int = 10,
@@ -181,6 +188,7 @@ class FaissStore:
                     self._remove_by_doc_ids(del_ids)
             else:
                 return
+            self._faiss_dirty = True
             self._save()
 
     def count(self) -> int:
@@ -189,6 +197,12 @@ class FaissStore:
 
     def close(self) -> None:
         with self._lock:
+            if self._faiss_dirty:
+                try:
+                    faiss.write_index(self.index, str(self.path / "index.faiss"))
+                    self._faiss_dirty = False
+                except Exception:
+                    logger.exception("FAISS index write failed on close")
             if hasattr(self, '_db'):
                 self._db.close()
 
@@ -241,11 +255,18 @@ class FaissStore:
             self._db.execute("DROP TABLE IF EXISTS pos_map")
             self._db.commit()
 
+    def _save_seq(self) -> None:
+        tmp = self.path / "seq.tmp"
+        tmp.write_text(str(self._seq))
+        tmp.replace(self._seq_path)
+
     def _alloc_faiss_ids(self, count: int) -> np.ndarray:
-        """Allocate ``count`` unique int64 FAISS IDs from the sequence counter."""
+        """Allocate ``count`` unique int64 FAISS IDs from the sequence counter.
+        Defers seq.txt write to _save() when _faiss_dirty is set.
+        """
         start = self._seq + 1
         self._seq += count
-        self._save_seq()
+        self._faiss_dirty = True
         return np.arange(start, start + count, dtype=np.int64)
 
     def _write_docs(self, ids: list[str], texts: list[str],
@@ -337,11 +358,14 @@ class FaissStore:
             all_vecs, np.array(faiss_ids, dtype=np.int64),
         )
         logger.info("FAISS index rebuilt with %d vectors", len(vectors))
+        self._faiss_dirty = True
 
     def _save(self) -> None:
         try:
             self._db.commit()
-            faiss.write_index(self.index, str(self.path / "index.faiss"))
+            if self._faiss_dirty:
+                faiss.write_index(self.index, str(self.path / "index.faiss"))
+                self._faiss_dirty = False
         except Exception:
             logger.exception("FAISS index write failed")
             raise

@@ -148,6 +148,7 @@ class EntityRegistry:
         detected = self._detector.detect(text)
         count = 0
 
+        triples: list[tuple] = []
         for entity in detected:
             name = entity.get("name", "").strip()
             entity_type = entity.get("type", "entity")
@@ -157,12 +158,13 @@ class EntityRegistry:
             if self.resolve(name) is not None:
                 continue
 
-            self._kg.add(subject=name, predicate="is_a", object=entity_type, source=source)
+            triples.append((name, "is_a", entity_type, None, None, 1.0, None, source))
             if source:
-                self._kg.add(subject=name, predicate="found_in", object=source, source=source)
-
+                triples.append((name, "found_in", source, None, None, 1.0, None, source))
             count += 1
 
+        if triples:
+            self._kg.batch_add_triples(triples)
         return count
 
     def research(self, word: str, allow_network: bool = False, auto_confirm: bool = False) -> dict:
@@ -393,20 +395,24 @@ class EntityRegistry:
             return True
 
         out_facts = self._kg.query(entity=source_canon, direction="outgoing")
+        in_facts = self._kg.query(entity=source_canon, direction="incoming")
+
+        triples: list[tuple] = []
         for f in out_facts:
             if f["predicate"] in ("is_a", "merged_into"):
                 continue
-            self._kg.add(subject=target_canon, predicate=f["predicate"],
-                         object=f["object"], source=f.get("source", ""))
+            triples.append((target_canon, f["predicate"], f["object"],
+                           None, None, 1.0, None, f.get("source", "")))
 
-        in_facts = self._kg.query(entity=source_canon, direction="incoming")
         for f in in_facts:
             if f["predicate"] == "merged_into":
                 continue
-            self._kg.add(subject=f["subject"], predicate=f["predicate"],
-                         object=target_canon, source=f.get("source", ""))
+            triples.append((f["subject"], f["predicate"], target_canon,
+                           None, None, 1.0, None, f.get("source", "")))
 
-        self._kg.add(subject=source_canon, predicate="merged_into", object=target_canon)
+        triples.append((source_canon, "merged_into", target_canon,
+                       None, None, 1.0, None, ""))
+        self._kg.batch_add_triples(triples)
 
         is_a_facts = [f for f in out_facts if f["predicate"] == "is_a"]
         for f in is_a_facts:

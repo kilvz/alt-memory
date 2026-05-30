@@ -130,35 +130,42 @@ _ENTITY_EXTRACT_WINDOW = 1000
 _ENTITY_METADATA_LIMIT = 50
 
 
-def _load_known_entities(dim: Dimension) -> dict[str, dict]:
-    """Load persisted known_entities from the knowledge graph."""
-    from alt_memory.backends.knowledge_graph import KnowledgeGraph
+def _load_known_entities(dim: Optional[Dimension] = None) -> dict[str, dict]:
+    """Load persisted known_entities from the knowledge graph.
 
-    kg_db = getattr(dim, "_kg_db", None)
-    if kg_db:
-        try:
-            kg = KnowledgeGraph(kg_db)
-            entities: dict[str, dict] = {}
-            for row in kg_db.execute(
-                "SELECT DISTINCT subject AS name FROM kg_facts"
-            ).fetchall():
-                name: str = row[0]
-                if not name or name in _ENTITY_STOPLIST:
-                    continue
-                entities[name] = {"name": name, "in_kg": True}
-            return entities
-        except Exception:
-            logger.warning("Failed to load known entities from KG", exc_info=True)
-            return {}
-    return {}
+    Uses the dimension's existing KG connection; no new KG is created.
+    Returns empty dict if dim is None or KG info is unavailable.
+    """
+    if dim is None:
+        return {}
+
+    kg = getattr(dim, "kg", None)
+    if kg is None:
+        return {}
+
+    try:
+        conn = kg._conn()
+        entities: dict[str, dict] = {}
+        for row in conn.execute(
+            "SELECT DISTINCT subject AS name FROM facts"
+        ).fetchall():
+            name: str = row[0]
+            if not name or name in _ENTITY_STOPLIST:
+                continue
+            entities[name] = {"name": name, "in_kg": True}
+        return entities
+    except Exception:
+        logger.warning("Failed to load known entities from KG", exc_info=True)
+        return {}
 
 
 def _extract_entities_for_metadata(
-    text: str, dim: Dimension, limit: int = _ENTITY_METADATA_LIMIT
+    text: str, dim: Optional[Dimension] = None, limit: int = _ENTITY_METADATA_LIMIT
 ) -> list[dict]:
     """Extract named-entity metadata from text for entity metadata.
 
     Returns a list of dicts, each with keys: ``name``, ``type``, ``count``.
+    Only checks the KG for known entities when *dim* is provided.
     """
     from alt_memory.entity_detector import _extract_candidate_words
 
@@ -239,13 +246,23 @@ def should_skip_dir(dirname: str) -> bool:
     return dirname in SKIP_DIRS or dirname.endswith(".egg-info")
 
 
+# Cache full file content so domain detection preview doesn't double-read.
+_FILE_CONTENT_CACHE: dict[str, str] = {}
+
+
 def _read_file_preview(filepath: str, max_chars: int = 2000) -> str:
-    """Read first ``max_chars`` of a text file for content-based routing."""
+    """Read first ``max_chars`` of a text file for content-based routing.
+
+    Caches the full content so ``mine_file_into_dimension`` does not
+    re-read the same file from disk.
+    """
     try:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-            return f.read(max_chars)
+            full = f.read()
     except Exception:
         return ""
+    _FILE_CONTENT_CACHE[filepath] = full
+    return full[:max_chars]
 
 
 def is_gitignored(rel_path: str, matchers: list, is_dir: bool = False) -> bool:
@@ -597,19 +614,28 @@ def _compute_topic_tunnels_for_wing(realm: str, dimension: "Dimension") -> int:
             return 0
         tunnels_created = 0
         all_realms = dimension.list_realms()
+        # Pre-load topics per realm (R queries instead of T×R)
+        realm_topics: dict[str, set[str]] = {}
+        for other in all_realms:
+            if other["name"] == realm:
+                continue
+            other_entities = dimension.list_entities(
+                realm=other["name"], domain=None, limit=10000,
+            )
+            other_topics: set[str] = set()
+            for oe in other_entities:
+                t = oe.get("metadata", {}).get("topic", "")
+                if t:
+                    other_topics.add(t)
+            realm_topics[other["name"]] = other_topics
         for topic in sorted(topics):
-            for other in all_realms:
-                if other["name"] == realm:
-                    continue
-                other_entities = dimension.list_entities(
-                    realm=other["name"], domain=topic, limit=1,
-                )
-                if other_entities:
+            for other_name, other_topics in realm_topics.items():
+                if topic in other_topics:
                     from alt_memory.dim_graph import create_tunnel
                     create_tunnel(
                         source_realm=realm,
                         source_domain=topic,
-                        target_realm=other["name"],
+                        target_realm=other_name,
                         target_domain=topic,
                         label=f"Shared topic: {topic}",
                         dimension=dimension,
@@ -810,12 +836,16 @@ def mine_file_into_dimension(
         logger.warning("File not found: %s", resolved)
         return 0
 
-    try:
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-            content = f.read()
-    except Exception as e:
-        logger.error("Failed to read %s: %s", resolved, e)
-        return 0
+    cached = _FILE_CONTENT_CACHE.pop(resolved, None)
+    if cached is not None:
+        content = cached
+    else:
+        try:
+            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception as e:
+            logger.error("Failed to read %s: %s", resolved, e)
+            return 0
 
     if not content.strip():
         return 0

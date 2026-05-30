@@ -5,6 +5,7 @@ Exposes all Dimension operations as JSON-RPC tools over stdio or SSE transport.
 
 from __future__ import annotations
 
+import atexit
 import json
 import logging
 import os
@@ -55,6 +56,9 @@ _WAL_FILE = os.path.join(
     os.environ.get("ALT_MEMORY_HOME", os.path.expanduser("~/.alt-memory")),
     "mcp_wal.jsonl",
 )
+# Keep WAL file handle open to avoid open/close syscall per MCP write.
+_WAL_HANDLE = None
+_WAL_LOCK = threading.Lock()
 
 
 def _init_mcp_logging() -> None:
@@ -96,11 +100,28 @@ def _wal_log(dimension: str, method: str, params: dict, result: Any = None, erro
         "result_status": "ok" if not error else "error",
         "error": error,
     }
-    try:
-        with open(_WAL_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, default=str) + "\n")
-    except Exception as e:
-        logger.error("WAL write failed: %s", e)
+    global _WAL_HANDLE
+    with _WAL_LOCK:
+        try:
+            if _WAL_HANDLE is None:
+                dirpath = os.path.dirname(_WAL_FILE)
+                os.makedirs(dirpath, exist_ok=True)
+                _WAL_HANDLE = open(_WAL_FILE, "a", encoding="utf-8", buffering=1)
+                atexit.register(_close_wal)
+            _WAL_HANDLE.write(json.dumps(entry, default=str) + "\n")
+        except Exception as e:
+            logger.error("WAL write failed: %s", e)
+
+
+def _close_wal() -> None:
+    global _WAL_HANDLE
+    with _WAL_LOCK:
+        if _WAL_HANDLE is not None:
+            try:
+                _WAL_HANDLE.close()
+            except Exception:
+                pass
+            _WAL_HANDLE = None
 
 
 # Idle watchdog -- stale MCP server auto-exit

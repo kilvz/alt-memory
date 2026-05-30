@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Optional
 
+DEFAULT_DIM = 384
+
 
 # ── Error hierarchy ───────────────────────────────────────────────────────
 
@@ -17,20 +19,8 @@ class DimensionNotFoundError(BackendError, FileNotFoundError):
     """Raised when a dimension directory or database is missing."""
 
 
-class CollectionNotInitializedError(DimensionNotFoundError):
-    """Raised when the dimension exists but the collection has never been created."""
-
-
 class DimensionMismatchError(BackendError):
     """Raised when embedding dimension on write does not match the collection."""
-
-
-class BackendClosedError(BackendError):
-    """Raised when a backend method is called after close()."""
-
-
-class EmbedderIdentityMismatchError(BackendError):
-    """Raised when the stored embedder model name differs from the current one."""
 
 
 class UnsupportedFilterError(BackendError):

@@ -289,6 +289,7 @@ def _fuzzy_match(query: str, nodes: dict, n: int = 5):
 # Keyed by tunnel file path. Invalidated when mtime changes.
 _tunnel_cache: dict[str, list[dict]] = {}
 _tunnel_cache_mtime: dict[str, int] = {}
+_tunnel_cache_lock = threading.Lock()
 
 
 def _tunnel_file(config=None, dimension=None) -> str:
@@ -319,16 +320,17 @@ def _load_tunnels(config=None, dimension=None):
     """
     tunnel_file = _tunnel_file(config=config, dimension=dimension)
 
-    # Check in-memory cache
-    try:
-        stat = os.stat(tunnel_file)
-        cached_mtime = _tunnel_cache_mtime.get(tunnel_file)
-        if cached_mtime is not None and stat.st_mtime_ns == cached_mtime:
-            cached = _tunnel_cache.get(tunnel_file)
-            if cached is not None:
-                return list(cached)
-    except OSError:
-        pass
+    # Check in-memory cache (under lock)
+    with _tunnel_cache_lock:
+        try:
+            stat = os.stat(tunnel_file)
+            cached_mtime = _tunnel_cache_mtime.get(tunnel_file)
+            if cached_mtime is not None and stat.st_mtime_ns == cached_mtime:
+                cached = _tunnel_cache.get(tunnel_file)
+                if cached is not None:
+                    return list(cached)
+        except OSError:
+            pass
 
     if os.path.exists(tunnel_file):
         try:
@@ -344,12 +346,13 @@ def _load_tunnels(config=None, dimension=None):
     else:
         result = []
 
-    # Update cache
-    _tunnel_cache[tunnel_file] = list(result)
-    try:
-        _tunnel_cache_mtime[tunnel_file] = os.stat(tunnel_file).st_mtime_ns
-    except OSError:
-        _tunnel_cache_mtime.pop(tunnel_file, None)
+    # Update cache (under lock)
+    with _tunnel_cache_lock:
+        _tunnel_cache[tunnel_file] = list(result)
+        try:
+            _tunnel_cache_mtime[tunnel_file] = os.stat(tunnel_file).st_mtime_ns
+        except OSError:
+            _tunnel_cache_mtime.pop(tunnel_file, None)
     return result
 
 
@@ -390,12 +393,13 @@ def _save_tunnels(tunnels, config=None, dimension=None):
     except (OSError, NotImplementedError):
         pass
 
-    # Update in-memory cache
-    _tunnel_cache[tunnel_file] = list(tunnels)
-    try:
-        _tunnel_cache_mtime[tunnel_file] = os.stat(tunnel_file).st_mtime_ns
-    except OSError:
-        _tunnel_cache_mtime.pop(tunnel_file, None)
+    # Update in-memory cache (under lock)
+    with _tunnel_cache_lock:
+        _tunnel_cache[tunnel_file] = list(tunnels)
+        try:
+            _tunnel_cache_mtime[tunnel_file] = os.stat(tunnel_file).st_mtime_ns
+        except OSError:
+            _tunnel_cache_mtime.pop(tunnel_file, None)
 
 
 def _endpoint_key(realm: str, domain: str) -> str:

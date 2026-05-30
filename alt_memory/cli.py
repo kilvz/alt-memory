@@ -95,6 +95,11 @@ def main():
     p_recordr.add_argument("--agent", "-a", required=True)
     p_recordr.add_argument("--last-n", type=int, default=10)
 
+    p_record_ingest = sub.add_parser("record-ingest", help="Ingest daily summary files into the dimension")
+    p_record_ingest.add_argument("--dir", required=True, help="Path to daily_summaries directory")
+    p_record_ingest.add_argument("--realm", default="record")
+    p_record_ingest.add_argument("--force", action="store_true")
+
     p_dedup = sub.add_parser("check-dup", help="Check for duplicate content")
     p_dedup.add_argument("content")
     p_dedup.add_argument("--threshold", type=float, default=0.9)
@@ -333,6 +338,11 @@ def main():
                 for e in entries:
                     print(f"\n[{e['created_at']}] topic={e['metadata'].get('topic', '?')}")
                     print(f"  {e['content'][:200]}")
+
+        elif args.command == "record-ingest":
+            from alt_memory.record_ingest import ingest_records
+            result = ingest_records(args.dir, args.dimension, realm=args.realm, force=args.force)
+            print(f"Record ingest: {result['days_updated']} days, {result['nodes_created']} nodes")
 
         elif args.command == "check-dup":
             dup = dim.check_duplicate(args.content, args.threshold)

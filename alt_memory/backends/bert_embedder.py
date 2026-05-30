@@ -10,6 +10,7 @@ first use, converts to .npz, and caches locally.
 import json
 import logging
 import struct
+import threading
 import urllib.request
 from pathlib import Path
 from typing import Optional
@@ -101,6 +102,7 @@ class NumpyBertEmbedder:
         self._tokenizer = None
         self._loaded = False
         self._config: dict = {}
+        self._lock = threading.Lock()
 
     @property
     def dimension(self) -> int:
@@ -130,29 +132,32 @@ class NumpyBertEmbedder:
     def _lazy_load(self) -> None:
         if self._loaded:
             return
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        weights_path = _CACHE_DIR / _WEIGHTS_FILE
-        tokenizer_path = _CACHE_DIR / _TOKENIZER_FILE
-        config_path = _CACHE_DIR / _CONFIG_FILE
-        if not weights_path.exists():
-            self._download_and_convert_weights()
-        if not tokenizer_path.exists():
-            self._download_file(_TOKENIZER_FILE)
-        if not config_path.exists():
-            self._download_file(_CONFIG_FILE)
-        self._weights = dict(np.load(str(weights_path)))
-        with open(config_path) as f:
-            self._config = json.load(f)
-        from tokenizers import Tokenizer
-        self._tokenizer = Tokenizer.from_file(str(tokenizer_path))
-        self._tokenizer.enable_padding()
-        self._tokenizer.enable_truncation(max_length=512)
-        self._loaded = True
-        logger.info(
-            "NumpyBertEmbedder loaded: model=%s weights=%.1fMB",
-            self._model_name,
-            weights_path.stat().st_size / 1e6,
-        )
+        with self._lock:
+            if self._loaded:
+                return
+            _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            weights_path = _CACHE_DIR / _WEIGHTS_FILE
+            tokenizer_path = _CACHE_DIR / _TOKENIZER_FILE
+            config_path = _CACHE_DIR / _CONFIG_FILE
+            if not weights_path.exists():
+                self._download_and_convert_weights()
+            if not tokenizer_path.exists():
+                self._download_file(_TOKENIZER_FILE)
+            if not config_path.exists():
+                self._download_file(_CONFIG_FILE)
+            self._weights = dict(np.load(str(weights_path)))
+            with open(config_path) as f:
+                self._config = json.load(f)
+            from tokenizers import Tokenizer
+            self._tokenizer = Tokenizer.from_file(str(tokenizer_path))
+            self._tokenizer.enable_padding()
+            self._tokenizer.enable_truncation(max_length=512)
+            self._loaded = True
+            logger.info(
+                "NumpyBertEmbedder loaded: model=%s weights=%.1fMB",
+                self._model_name,
+                weights_path.stat().st_size / 1e6,
+            )
 
     def _download_file(self, filename: str) -> None:
         url = _FILES.get(filename)

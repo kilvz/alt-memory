@@ -127,12 +127,13 @@ class KnowledgeGraph:
             logger.info("_migrate_schema: migrated source_drawer_id → source_entity_id")
 
     def _conn(self):
-        if self._closed:
-            raise RuntimeError("KnowledgeGraph is closed")
-        if self._connection is None:
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("KnowledgeGraph is closed")
+            if self._connection is None:
             self._connection = sqlite3.connect(str(self._db_path), check_same_thread=False)
             self._connection.row_factory = sqlite3.Row
-        return self._connection
+            return self._connection
 
     @staticmethod
     def _entity_id(name: str) -> str:
@@ -165,6 +166,28 @@ class KnowledgeGraph:
                 (eid, name, entity_type, props))
             conn.commit()
         return eid
+
+    def batch_add_entities(self, entities: list[tuple[str, str, dict]]) -> list[str]:
+        """Add multiple entities in a single transaction.
+
+        Each tuple is ``(name, entity_type, properties)``.
+        Returns list of entity IDs in the same order as input.
+        """
+        eids: list[str] = []
+        rows: list[tuple] = []
+        for name, entity_type, properties in entities:
+            eid = self._entity_id(name)
+            eids.append(eid)
+            props = json.dumps(properties or {})
+            rows.append((eid, name, entity_type, props))
+        with self._lock:
+            conn = self._conn()
+            conn.executemany(
+                "INSERT OR REPLACE INTO entities (id, name, type, properties) VALUES (?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        return eids
 
     def add_triple(self, subject: str, predicate: str, obj: str,
                    valid_from: Optional[str] = None,
@@ -219,6 +242,73 @@ class KnowledgeGraph:
                  confidence, source_node, source_file, source_entity_id, adapter_name))
             conn.commit()
             return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    def batch_add_triples(self, triples: list[tuple]) -> list[int]:
+        """Add multiple triples in a single transaction.
+
+        Each tuple is ``(subject, predicate, object, valid_from, valid_to,
+        confidence, source_node, source_file, source_entity_id, adapter_name)``.
+        All fields after ``object`` are optional (pass ``None`` for defaults).
+
+        Returns a list of row IDs.
+        """
+        # First pass: parse and validate all tuples (lock-free).
+        # If any fails (inverted interval, bad temporal) no SQL is touched.
+        parsed: list[tuple] = []
+        for t in triples:
+            subject, predicate, obj = t[0], t[1], t[2]
+            valid_from = (sanitize_iso_temporal(t[3], "valid_from")
+                          if len(t) > 3 and t[3] else None)
+            valid_to = (sanitize_iso_temporal(t[4], "valid_to")
+                        if len(t) > 4 and t[4] else None)
+            if (valid_from is not None and valid_to is not None
+                    and _temporal_end_key(valid_to) < _temporal_start_key(valid_from)):
+                raise ValueError(
+                    f"valid_to={valid_to!r} is before valid_from={valid_from!r}; "
+                    "an inverted interval would be invisible to every KG query")
+            pred = predicate.lower().replace(" ", "_")
+            confidence = float(t[5]) if len(t) > 5 and t[5] is not None else 1.0
+            source_node = t[6] if len(t) > 6 else None
+            source_file = t[7] if len(t) > 7 else None
+            source_entity_id = t[8] if len(t) > 8 else None
+            adapter_name = t[9] if len(t) > 9 else None
+            parsed.append((subject, pred, obj, valid_from, valid_to, confidence,
+                          source_node, source_file, source_entity_id, adapter_name))
+
+        # Second pass: insert all inside a single transaction.
+        ids: list[int] = []
+        with self._lock:
+            conn = self._conn()
+            for (subject, pred, obj, valid_from, valid_to, confidence,
+                 source_node, source_file, source_entity_id, adapter_name) in parsed:
+                sub_id = self._entity_id(subject)
+                obj_id = self._entity_id(obj)
+                conn.execute(
+                    "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)",
+                    (sub_id, subject))
+                conn.execute(
+                    "INSERT OR IGNORE INTO entities (id, name) VALUES (?, ?)",
+                    (obj_id, obj))
+                existing = conn.execute(
+                    "SELECT id FROM facts WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
+                    (subject, pred, obj)).fetchone()
+                if existing:
+                    conn.execute(
+                        "UPDATE facts SET valid_from=?, valid_to=?, confidence=?, "
+                        "source_node=?, source_file=?, source_entity_id=?, adapter_name=? WHERE id=?",
+                        (valid_from, valid_to, confidence, source_node, source_file,
+                         source_entity_id, adapter_name, existing["id"]))
+                    ids.append(existing["id"])
+                else:
+                    conn.execute(
+                        "INSERT INTO facts (subject, predicate, object, valid_from, valid_to, "
+                        "confidence, source_node, source_file, source_entity_id, adapter_name) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (subject, pred, obj, valid_from, valid_to, confidence,
+                         source_node, source_file, source_entity_id, adapter_name))
+                    ids.append(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            conn.commit()
+        return ids
 
     def invalidate(self, subject: str, predicate: str, object: str,
                    ended: Optional[str] = None) -> int:
@@ -423,45 +513,65 @@ class KnowledgeGraph:
     # ── Seed from known facts ─────────────────────────────────────────────
 
     def seed_from_entity_facts(self, entity_facts: dict) -> None:
-        """Seed the knowledge graph from fact_checker.py ENTITY_FACTS."""
+        """Seed the knowledge graph from fact_checker.py ENTITY_FACTS.
+
+        Uses batch operations for efficiency — one transaction for entities,
+        one for triples.
+        """
+        entity_batch: list[tuple[str, str, dict]] = []
+        triple_batch: list[tuple] = []
         for key, facts in entity_facts.items():
             name = facts.get("full_name", key.capitalize())
             etype = facts.get("type", "person")
-            self.add_entity(name, etype, {
+            entity_batch.append((name, etype, {
                 "gender": facts.get("gender", ""),
                 "birthday": facts.get("birthday", ""),
-            })
+            }))
             parent = facts.get("parent")
             if parent:
-                self.add_triple(
+                triple_batch.append((
                     name, "child_of", parent,
-                    valid_from=facts.get("birthday"))
+                    facts.get("birthday"), None, 1.0, None, None, None, None))
             partner = facts.get("partner")
             if partner:
-                self.add_triple(name, "married_to", partner)
+                triple_batch.append((
+                    name, "married_to", partner,
+                    None, None, 1.0, None, None, None, None))
             relationship = facts.get("relationship", "")
             if relationship == "daughter":
-                parent = (facts.get("parent") or "").capitalize()
-                if parent and parent != name:
-                    self.add_triple(
-                        name, "is_child_of", parent,
-                        valid_from=facts.get("birthday"))
+                p = (facts.get("parent") or "").capitalize()
+                if p and p != name:
+                    triple_batch.append((
+                        name, "is_child_of", p,
+                        facts.get("birthday"), None, 1.0, None, None, None, None))
             elif relationship == "husband":
-                partner = (facts.get("partner") or "").capitalize()
-                if partner and partner != name:
-                    self.add_triple(name, "is_partner_of", partner)
+                p = (facts.get("partner") or "").capitalize()
+                if p and p != name:
+                    triple_batch.append((
+                        name, "is_partner_of", p,
+                        None, None, 1.0, None, None, None, None))
             elif relationship == "brother":
-                sibling = (facts.get("sibling") or "").capitalize()
-                if sibling and sibling != name:
-                    self.add_triple(name, "is_sibling_of", sibling)
+                sib = (facts.get("sibling") or "").capitalize()
+                if sib and sib != name:
+                    triple_batch.append((
+                        name, "is_sibling_of", sib,
+                        None, None, 1.0, None, None, None, None))
             elif relationship == "dog":
                 owner = (facts.get("owner") or "").capitalize()
                 if owner and owner != name:
-                    self.add_triple(name, "is_pet_of", owner)
-                self.add_entity(name, "animal")
+                    triple_batch.append((
+                        name, "is_pet_of", owner,
+                        None, None, 1.0, None, None, None, None))
+                entity_batch.append((name, "animal", {}))
             for interest in facts.get("interests", []):
-                self.add_triple(name, "loves", interest.capitalize(),
-                                valid_from="2025-01-01")
+                triple_batch.append((
+                    name, "loves", interest.capitalize(),
+                    "2025-01-01", None, 1.0, None, None, None, None))
+
+        if entity_batch:
+            self.batch_add_entities(entity_batch)
+        if triple_batch:
+            self.batch_add_triples(triple_batch)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 

@@ -27,7 +27,7 @@ class NumpyEmbedder:
 
     def __init__(self, model_dir: Optional[str] = None):
         self.model_dir = model_dir
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._vocab: dict[str, int] = {}
         self._idf: Optional[np.ndarray] = None
         self._svd_components: Optional[np.ndarray] = None
@@ -59,37 +59,39 @@ class NumpyEmbedder:
         return self._fitted
 
     def save(self, directory: str) -> None:
-        path = Path(directory)
-        path.mkdir(parents=True, exist_ok=True)
-        data = {
-            "vocab": self._vocab,
-            "idf": self._idf.tolist() if self._idf is not None else None,
-            "svd_components": self._svd_components.tolist() if self._svd_components is not None else None,
-            "svd_mean": self._svd_mean.tolist() if self._svd_mean is not None else None,
-            "doc_count": self._doc_count,
-            "df": self._df,
-        }
-        tmp = path / "embedder.json.tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        tmp.replace(path / "embedder.json")
-        logger.info("Embedder saved to %s (%d terms)", directory, len(self._vocab))
+        with self._lock:
+            path = Path(directory)
+            path.mkdir(parents=True, exist_ok=True)
+            data = {
+                "vocab": self._vocab,
+                "idf": self._idf.tolist() if self._idf is not None else None,
+                "svd_components": self._svd_components.tolist() if self._svd_components is not None else None,
+                "svd_mean": self._svd_mean.tolist() if self._svd_mean is not None else None,
+                "doc_count": self._doc_count,
+                "df": self._df,
+            }
+            tmp = path / "embedder.json.tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            tmp.replace(path / "embedder.json")
+            logger.info("Embedder saved to %s (%d terms)", directory, len(self._vocab))
 
     def _load(self) -> None:
-        path = Path(self.model_dir) / "embedder.json"
-        if not path.exists():
-            return
-        with open(path) as f:
-            data = json.load(f)
-        self._vocab = data.get("vocab", {})
-        self._idf = np.array(data["idf"]) if data.get("idf") else None
-        self._svd_components = np.array(data["svd_components"]) if data.get("svd_components") else None
-        self._svd_mean = np.array(data["svd_mean"]) if data.get("svd_mean") else None
-        self._doc_count = data.get("doc_count", 0)
-        self._df = data.get("df", {})
-        self._fitted = bool(self._vocab)
-        if self._fitted:
-            logger.info("Embedder loaded from %s (%d terms, %d docs seen)", self.model_dir, len(self._vocab), self._doc_count)
+        with self._lock:
+            path = Path(self.model_dir) / "embedder.json"
+            if not path.exists():
+                return
+            with open(path) as f:
+                data = json.load(f)
+            self._vocab = data.get("vocab", {})
+            self._idf = np.array(data["idf"]) if data.get("idf") else None
+            self._svd_components = np.array(data["svd_components"]) if data.get("svd_components") else None
+            self._svd_mean = np.array(data["svd_mean"]) if data.get("svd_mean") else None
+            self._doc_count = data.get("doc_count", 0)
+            self._df = data.get("df", {})
+            self._fitted = bool(self._vocab)
+            if self._fitted:
+                logger.info("Embedder loaded from %s (%d terms, %d docs seen)", self.model_dir, len(self._vocab), self._doc_count)
 
     def _fit(self, texts: list[str]) -> None:
         with self._lock:
@@ -120,6 +122,8 @@ class NumpyEmbedder:
             if vocab_size == 0:
                 logger.warning("Empty vocabulary")
                 self._fitted = True
+                if self.model_dir:
+                    self.save(self.model_dir)
                 return
 
             idf = np.zeros(vocab_size, dtype=np.float64)
@@ -145,6 +149,8 @@ class NumpyEmbedder:
             if k < 1:
                 logger.warning("Not enough data for SVD (k=%d)", k)
                 self._fitted = True
+                if self.model_dir:
+                    self.save(self.model_dir)
                 return
 
             u, s, vt = svds(tfidf, k=k)
@@ -164,6 +170,8 @@ class NumpyEmbedder:
 
             self._fitted = True
             logger.info("Embedder fitted: %d terms, %d docs, SVD k=%d -> %d dims", vocab_size, n_docs, k_use, _EMBED_DIM)
+            if self.model_dir:
+                self.save(self.model_dir)
 
     def _transform(self, texts: list[str]) -> csr_array:
         if not self._vocab or self._idf is None:
@@ -503,6 +511,7 @@ class OnnxEmbedder:
         self._session = None
         self._tokenizer = None
         self._input_names: Optional[list[str]] = None
+        self._lock = threading.Lock()
 
     @property
     def dimension(self) -> int:
@@ -545,36 +554,35 @@ class OnnxEmbedder:
     def _lazy_load(self) -> None:
         if self._session is not None:
             return
-        try:
-            import onnxruntime as ort
-            from transformers import AutoTokenizer
-        except ImportError as e:
-            raise ImportError(
-                "OnnxEmbedder requires onnxruntime, transformers, and numpy. "
-                "Install with: pip install onnxruntime transformers numpy"
-            ) from e
+        with self._lock:
+            if self._session is not None:
+                return
+            try:
+                import onnxruntime as ort
+                from transformers import AutoTokenizer
+            except ImportError as e:
+                raise ImportError(
+                    "OnnxEmbedder requires onnxruntime, transformers, and numpy. "
+                    "Install with: pip install onnxruntime transformers numpy"
+                ) from e
 
-        model_id = f"sentence-transformers/{self._model_name}"
-        # ONNX export path: download the ONNX model or use the transformer model
-        # with optimum. For simplicity, load the full model via optimum.
-        try:
-            from optimum.onnxruntime import ORTModelForFeatureExtraction
+            model_id = f"sentence-transformers/{self._model_name}"
+            try:
+                from optimum.onnxruntime import ORTModelForFeatureExtraction
 
-            self._session = ORTModelForFeatureExtraction.from_pretrained(
-                model_id, export=True, provider=self._providers[0]
+                self._session = ORTModelForFeatureExtraction.from_pretrained(
+                    model_id, export=True, provider=self._providers[0]
+                )
+                self._session = self._session.session
+            except ImportError:
+                self._session = self._load_direct_onnx(model_id, ort, np)
+
+            self._tokenizer = AutoTokenizer.from_pretrained(model_id)
+            self._input_names = [inp.name for inp in self._session.get_inputs()]
+            logger.info(
+                "OnnxEmbedder loaded: model=%s device=%s inputs=%s",
+                self._model_name, self._device_label, self._input_names,
             )
-            # ORTModelForFeatureExtraction wraps the session; extract it
-            self._session = self._session.session
-        except ImportError:
-            # Fallback: try direct ONNX model on HF hub
-            self._session = self._load_direct_onnx(model_id, ort, np)
-
-        self._tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self._input_names = [inp.name for inp in self._session.get_inputs()]
-        logger.info(
-            "OnnxEmbedder loaded: model=%s device=%s inputs=%s",
-            self._model_name, self._device_label, self._input_names,
-        )
 
     def _load_direct_onnx(
         self, model_id: str, ort: "Any", np: "Any"

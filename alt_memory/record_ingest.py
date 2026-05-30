@@ -149,7 +149,8 @@ def ingest_records(
                 _purge_entities_with_source(dim, source_file)
 
             if new_entries:
-                all_lines = []
+                batch: list[tuple[str, str, str, dict, str, Optional[str]]] = []
+                entry_chunks: list[tuple[str, list[str]]] = []
                 for entry in new_entries:
                     entry_text = f"{entry['header']}\n{entry['body']}" if entry['body'] else entry['header']
                     chunks = chunk_entry(entry_text, NODE_CHAR_LIMIT)
@@ -157,11 +158,9 @@ def ingest_records(
                     for chunk_idx, chunk_text in enumerate(chunks):
                         eid = _record_entity_id(source_file, entry['entry_index'], chunk_idx)
                         entry_ids.append(eid)
-                        dim.add_entity(
-                            realm=realm,
-                            domain="daily",
-                            content=chunk_text,
-                            metadata={
+                        batch.append((
+                            realm, "daily", chunk_text,
+                            {
                                 "entry_index": entry['entry_index'],
                                 "entry_header_preview": entry['header'][:120],
                                 "chunk_index": chunk_idx,
@@ -169,9 +168,14 @@ def ingest_records(
                                 "date": date_str,
                                 "filed_at": now_iso,
                             },
-                            source_file=source_file,
-                            entity_id=eid,
-                        )
+                            source_file, eid,
+                        ))
+                    entry_chunks.append((entry_text, entry_ids))
+
+                dim.batch_add_entities(batch)
+
+                all_lines = []
+                for entry_text, entry_ids in entry_chunks:
                     entry_lines = build_node_lines(
                         text=entry_text,
                         existing={},

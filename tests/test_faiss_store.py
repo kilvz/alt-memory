@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from alt_memory.backends.faiss_store import FaissStore
-from alt_memory.backends.base import DEFAULT_DIM
+from alt_memory.backends.types import DEFAULT_DIM
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ from typing import Optional
 
 import numpy as np
 
-from alt_memory.backends.base import DEFAULT_DIM
+from alt_memory.backends.types import DEFAULT_DIM
 
 logger = logging.getLogger(__name__)
 
@@ -148,10 +148,11 @@ class ChromaStore:
             return self._collection.count()
 
     def close(self) -> None:
-        try:
-            self._client.close()
-        except Exception as exc:
-            logger.warning("ChromaStore.close error: %s", exc)
+        with self._lock:
+            try:
+                self._client.close()
+            except Exception as exc:
+                logger.warning("ChromaStore.close error: %s", exc)
 
     def next_id(self) -> str:
         with self._lock:

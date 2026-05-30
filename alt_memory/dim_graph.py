@@ -285,6 +285,12 @@ def _fuzzy_match(query: str, nodes: dict, n: int = 5):
     return [r for r, _ in scored[:n]]
 
 
+# In-memory cache for tunnels — avoids redundant disk reads on every mutation.
+# Keyed by tunnel file path. Invalidated when mtime changes.
+_tunnel_cache: dict[str, list[dict]] = {}
+_tunnel_cache_mtime: dict[str, int] = {}
+
+
 def _tunnel_file(config=None, dimension=None) -> str:
     """Return the path to the tunnels.json file, derived from AltMemoryConfig or dimension.
 
@@ -311,19 +317,40 @@ def _load_tunnels(config=None, dimension=None):
     file path from the dimension's base directory. Takes precedence if both
     are supplied.
     """
-    current_tunnel_file = _tunnel_file(config=config, dimension=dimension)
-    if os.path.exists(current_tunnel_file):
+    tunnel_file = _tunnel_file(config=config, dimension=dimension)
+
+    # Check in-memory cache
+    try:
+        stat = os.stat(tunnel_file)
+        cached_mtime = _tunnel_cache_mtime.get(tunnel_file)
+        if cached_mtime is not None and stat.st_mtime_ns == cached_mtime:
+            cached = _tunnel_cache.get(tunnel_file)
+            if cached is not None:
+                return list(cached)
+    except OSError:
+        pass
+
+    if os.path.exists(tunnel_file):
         try:
-            with open(current_tunnel_file, "r", encoding="utf-8") as f:
+            with open(tunnel_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception:
             logger.warning(
                 "Tunnels file '%s' is corrupt or unreadable; starting empty.",
-                current_tunnel_file,
+                tunnel_file,
             )
-            return []
-        return data if isinstance(data, list) else []
-    return []
+            data = []
+        result = data if isinstance(data, list) else []
+    else:
+        result = []
+
+    # Update cache
+    _tunnel_cache[tunnel_file] = list(result)
+    try:
+        _tunnel_cache_mtime[tunnel_file] = os.stat(tunnel_file).st_mtime_ns
+    except OSError:
+        _tunnel_cache_mtime.pop(tunnel_file, None)
+    return result
 
 
 def _save_tunnels(tunnels, config=None, dimension=None):
@@ -362,6 +389,13 @@ def _save_tunnels(tunnels, config=None, dimension=None):
         os.chmod(tunnel_file, 0o600)
     except (OSError, NotImplementedError):
         pass
+
+    # Update in-memory cache
+    _tunnel_cache[tunnel_file] = list(tunnels)
+    try:
+        _tunnel_cache_mtime[tunnel_file] = os.stat(tunnel_file).st_mtime_ns
+    except OSError:
+        _tunnel_cache_mtime.pop(tunnel_file, None)
 
 
 def _endpoint_key(realm: str, domain: str) -> str:

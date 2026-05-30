@@ -18,7 +18,7 @@ from alt_memory.sources.base import (
     SourceSummary,
     TransformationViolationError,
 )
-from alt_memory.sources.context import PalaceContext, ProgressHook
+from alt_memory.sources.context import DimContext, PalaceContext, ProgressHook
 from alt_memory.sources.registry import (
     available_adapters,
     get_adapter,
@@ -38,6 +38,7 @@ __all__ = [
     "FieldSpec",
     "IngestMode",
     "IngestResult",
+    "DimContext",
     "PalaceContext",
     "ProgressHook",
     "RouteHint",

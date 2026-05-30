@@ -152,12 +152,12 @@ def _maybe_eager_warmup_embedder(dim: Dimension) -> None:
         return
     try:
         dim.search("warmup", n_results=1)
-        logger.info("Eager warmup: embedder ready (palace=%s)", dim._base)
+        logger.info("Eager warmup: embedder ready (dim=%s)", dim._base)
     except Exception as exc:
-        logger.exception("Eager warmup failed (palace=%s): %s", dim._base, exc)
+        logger.exception("Eager warmup failed (dim=%s): %s", dim._base, exc)
 
 
-VERSION = "4.2.0"
+VERSION = "4.3.0"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
 _TOOL_DEFINITIONS: list[dict] = []

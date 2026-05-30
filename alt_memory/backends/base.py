@@ -205,7 +205,7 @@ class BaseCollection(ABC):
 
 
 class BaseBackend(ABC):
-    """Long-lived factory serving many palaces."""
+    """Long-lived factory serving many dimensions."""
 
     name: ClassVar[str]
     spec_version: ClassVar[str] = "1.0"

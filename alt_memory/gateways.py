@@ -64,22 +64,50 @@ __all__ = [
 # Persistence — JSON file at _gateway_file(), restricted perms (0600) on POSIX
 # --------------------------------------------------------------------------
 
+# In-memory cache — avoids redundant disk reads on every mutation.
+_gateway_cache: list[dict] | None = None
+_gateway_cache_mtime: int = 0
+
 
 def _load_gateways() -> list[dict]:
     """Read all gateway records. Returns ``[]`` if the file is missing or corrupt."""
-    if not os.path.exists(_gateway_file()):
+    global _gateway_cache, _gateway_cache_mtime
+
+    # Check in-memory cache
+    gateway_file = _gateway_file()
+    try:
+        stat = os.stat(gateway_file)
+        if _gateway_cache is not None and stat.st_mtime_ns == _gateway_cache_mtime:
+            return list(_gateway_cache)
+    except OSError:
+        pass
+
+    if not os.path.exists(gateway_file):
+        _gateway_cache = []
+        _gateway_cache_mtime = 0
         return []
     try:
-        with open(_gateway_file(), encoding="utf-8") as f:
+        with open(gateway_file, encoding="utf-8") as f:
             raw = json.load(f)
     except (OSError, json.JSONDecodeError):
         logger.debug("gateways: load failed, treating as empty", exc_info=True)
+        _gateway_cache = []
+        _gateway_cache_mtime = 0
         return []
     if isinstance(raw, dict) and "gateways" in raw:
-        return raw.get("gateways") or []
-    if isinstance(raw, list):
-        return raw
-    return []
+        result = raw.get("gateways") or []
+    elif isinstance(raw, list):
+        result = raw
+    else:
+        result = []
+
+    # Update cache
+    _gateway_cache = list(result)
+    try:
+        _gateway_cache_mtime = os.stat(gateway_file).st_mtime_ns
+    except OSError:
+        _gateway_cache_mtime = 0
+    return result
 
 
 def _save_gateways(gateways: list[dict]) -> None:
@@ -90,12 +118,15 @@ def _save_gateways(gateways: list[dict]) -> None:
     gateways reveal within-realm entity connections that the user may
     not want world-readable.
     """
+    global _gateway_cache, _gateway_cache_mtime
+
     directory = os.path.dirname(_gateway_file())
     os.makedirs(directory, exist_ok=True)
     payload = {
         "schema_version": _SCHEMA_VERSION,
         "gateways": list(gateways),
     }
+    gateway_file = _gateway_file()
     fd, tmp_path = tempfile.mkstemp(prefix=".gateways-", suffix=".tmp", dir=directory)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -103,15 +134,21 @@ def _save_gateways(gateways: list[dict]) -> None:
         try:
             os.chmod(tmp_path, 0o600)
         except OSError:
-            # Non-POSIX systems may not support chmod; not fatal.
             pass
-        os.replace(tmp_path, _gateway_file())
+        os.replace(tmp_path, gateway_file)
     except Exception:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
         raise
+
+    # Update in-memory cache
+    _gateway_cache = list(gateways)
+    try:
+        _gateway_cache_mtime = os.stat(gateway_file).st_mtime_ns
+    except OSError:
+        _gateway_cache_mtime = 0
 
 
 # --------------------------------------------------------------------------

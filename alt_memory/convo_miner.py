@@ -599,22 +599,6 @@ def prefetch_mined_set(dim, extract_mode: Optional[str] = None) -> set[str]:
     return mined
 
 
-def _validate_dimension_fts5_after_mine(dim_path: str) -> None:
-    """Run PRAGMA quick_check on the dimension SQLite DB after a mine."""
-    db_path = os.path.join(str(dim_path), "dimension.db")
-    if os.path.isfile(db_path):
-        try:
-            conn = sqlite3.connect(db_path)
-            try:
-                result = conn.execute("PRAGMA quick_check").fetchone()
-                if result and result[0] != "ok":
-                    logger.warning("Post-mine integrity check: %s", result[0])
-            finally:
-                conn.close()
-        except Exception:
-            logger.debug("Post-mine integrity check skipped", exc_info=True)
-
-
 def mine_convos(
     convo_dir: str,
     dim_path: str,
@@ -680,8 +664,8 @@ def _mine_convos_impl(
 ):
     from alt_memory.config import AltMemoryConfig
 
-    palace_config = AltMemoryConfig()
-    cfg_chunk_size = palace_config.chunk_size
+    config = AltMemoryConfig()
+    cfg_chunk_size = config.chunk_size
     # Only override convo_miner's MIN_CHUNK_SIZE when the user has set
     # min_chunk_size explicitly. min_chunk_size_explicit returns the
     # validated value or None — None keeps convo's lower 30-char floor
@@ -690,7 +674,7 @@ def _mine_convos_impl(
     # _file_config) means a garbage/negative/bool config value can't
     # TypeError the length gate below or ValueError out of
     # chunk_exchanges and abort convo ingest.
-    explicit_min = palace_config.min_chunk_size_explicit
+    explicit_min = config.min_chunk_size_explicit
     cfg_min_chunk_size = explicit_min if explicit_min is not None else MIN_CHUNK_SIZE
 
     convo_path = Path(convo_dir).expanduser().resolve()
@@ -807,9 +791,6 @@ def _mine_convos_impl(
 
         total_entities += entities_added
         print(f"  + [{i:4}/{len(files)}] {filepath.name[:50]:50} +{entities_added}")
-
-    if not dry_run:
-        _validate_dimension_fts5_after_mine(dim_path)
 
     print(f"\n{'=' * 55}")
     print("  Done.")

@@ -27,7 +27,7 @@ from alt_memory.miner import (
 )
 from alt_memory.dimension import (
     Dimension, file_already_mined, get_nodes_collection, mine_lock,
-    _validate_dimension_fts5_after_mine, SKIP_DIRS,
+    SKIP_DIRS,
     ENTITY_UPSERT_BATCH_SIZE, DEFAULT_MAX_FILE_SIZE,
 )
 
@@ -255,7 +255,7 @@ def mine_formats(
     limit: int = 0,
     dry_run: bool = False,
 ) -> dict[str, int]:
-    palace_config = AltMemoryConfig()
+    config = AltMemoryConfig()
 
     format_path = Path(format_dir).expanduser().resolve()
     if not realm:
@@ -314,8 +314,8 @@ def mine_formats(
 
                 raw_chunks = _chunk_text(
                     text,
-                    min_size=palace_config.min_chunk_size,
-                    max_size=palace_config.chunk_size,
+                    min_size=config.min_chunk_size,
+                    max_size=config.chunk_size,
                 )
                 chunks = []
                 search_pos = 0
@@ -404,7 +404,6 @@ def mine_formats(
 
     else:
         if not dry_run:
-            _validate_dimension_fts5_after_mine(dim_path)
             dim = Dimension(dim_path)
             dim.init()
             _compute_topic_tunnels_for_wing(realm, dim)

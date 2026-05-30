@@ -1,4 +1,4 @@
-"""Alt Memory v4.3.0 — FAISS-powered memory dimension with hybrid search, entity graph, MCP server, and 40 MCP tools."""
+"""Alt Memory v4.3.0 — FAISS-powered memory dimension with hybrid search, entity graph, MCP server, and 56 MCP tools."""
 
 __version__ = "4.3.0"
 

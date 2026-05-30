@@ -684,7 +684,6 @@ class Dimension:
                 "INSERT INTO entities_fts (id, content) VALUES (?, ?)",
                 (entity_id, content))
             self._db.commit()
-        self._save_embedder()
         logger.debug("Added entity %s in %s/%s", entity_id, realm, domain)
         return entity_id
 
@@ -841,7 +840,6 @@ class Dimension:
                 "UPDATE entities SET content=?, metadata=?, realm=?, domain=? WHERE id=?",
                 (new_content, json.dumps(new_meta), new_realm, new_domain, entity_id))
             self._db.commit()
-        self._save_embedder()
         return True
 
     # -- Search (hybrid: FTS5 BM25 + FAISS vector) --
@@ -1044,7 +1042,7 @@ class Dimension:
     def _vector_search(self, query: str, n_results: int = 10,
                        realm: Optional[str] = None, domain: Optional[str] = None) -> list[SearchResult]:
         query_emb = self._embedder.embed([query])[0]
-        ids, texts, distances, metadatas = self._store.search(query_emb, n_results=n_results * 2)
+        ids, texts, distances, metadatas = self._store.search(query_emb, n_results=n_results)
         results = []
         for i in range(len(ids)):
             meta = metadatas[i] if i < len(metadatas) else {}

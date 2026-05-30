@@ -1,4 +1,4 @@
-"""PalaceContext facade passed to source adapters (RFC 002 §9)."""
+"""DimContext facade passed to source adapters (RFC 002 §9)."""
 
 from __future__ import annotations
 
@@ -25,10 +25,10 @@ ProgressHook = Callable[..., None]
 
 
 @dataclass
-class PalaceContext:
+class DimContext:
     drawer_collection: _CollectionLike
     knowledge_graph: _KnowledgeGraphLike
-    palace_path: str
+    dim_path: str
     node_collection: Optional[_CollectionLike] = None
     config: Optional[Any] = None
     adapter_name: str = ""
@@ -62,6 +62,9 @@ class PalaceContext:
                 import logging
 
                 logging.getLogger(__name__).exception("progress hook failed on %r", event)
+
+
+PalaceContext = DimContext
 
 
 def _build_drawer_id(record: DrawerRecord) -> str:

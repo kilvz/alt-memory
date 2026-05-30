@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Iterator, Literal, Optional
 
 if TYPE_CHECKING:
-    from alt_memory.sources.context import PalaceContext
+    from alt_memory.sources.context import DimContext as PalaceContext
 
 
 class SourceAdapterError(Exception):

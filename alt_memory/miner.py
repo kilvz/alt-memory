@@ -22,7 +22,6 @@ from alt_memory.dimension import (
     MineAlreadyRunning,
     mine_dimension_lock,
     _ENTITY_STOPLIST,
-    _validate_dimension_fts5_after_mine,
 )
 
 logger = logging.getLogger(__name__)
@@ -1057,11 +1056,6 @@ def batch_mine(
 
         finally:
             _cleanup_mine_pid_file(dim_path)
-
-    try:
-        _validate_dimension_fts5_after_mine(dim_path)
-    except Exception:
-        logger.warning("Post-mine FTS5 integrity validation failed", exc_info=True)
 
     return {
         "realm": realm,

@@ -1,6 +1,6 @@
-"""Alt Memory v4.3.0 — FAISS-powered memory dimension with hybrid search, entity graph, MCP server, and 56 MCP tools."""
+"""Alt Memory v4.5.0 — FAISS-powered memory dimension with hybrid search, entity graph, MCP server, and 56 MCP tools."""
 
-__version__ = "4.4.0"
+__version__ = "4.5.0"
 
 from alt_memory.dimension import Dimension, SearchResult, mine_lock, MineAlreadyRunning
 from alt_memory.backends.embedder import (

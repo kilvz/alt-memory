@@ -182,7 +182,7 @@ def _maybe_eager_warmup_embedder(dim: Dimension) -> None:
         logger.exception("Eager warmup failed (dim=%s): %s", dim._base, exc)
 
 
-VERSION = "4.3.0"
+VERSION = "4.5.0"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 
 _TOOL_DEFINITIONS: list[dict] = []

@@ -532,8 +532,14 @@ class Dimension:
                 from sentence_transformers import SentenceTransformer
                 SentenceTransformer
             except ImportError:
-                logger.warning("sentence_transformers not installed — falling back to numpy. Install with: pip install sentence-transformers")
-                model = "numpy"
+                try:
+                    import tokenizers
+                    tokenizers
+                    logger.info("sentence_transformers not available — using numpy_bert (pure numpy MiniLM)")
+                    model = "numpy_bert"
+                except ImportError:
+                    logger.warning("sentence_transformers and tokenizers not available — falling back to numpy")
+                    model = "numpy"
         elif model == "spacy":
             try:
                 import spacy

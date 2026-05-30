@@ -1,20 +1,29 @@
-# Alt Memory v4.3.0
+# Alt Memory
 
-Local-first AI memory system with hybrid search, entity graph, MCP server, and 40+ tools. Store, search, and manage persistent memory for AI agents — runs entirely on your machine.
+**Local-first persistent memory for AI agents.** Store, search, and manage structured memory with hybrid vector/keyword search, a knowledge graph, agent diaries, and an MCP server — all offline, no external services.
+
+```
+pip install alt-memory
+```
+
+---
 
 ## Features
 
-- **Hybrid search** — vector + keyword (FTS5) with configurable ranking
-- **Dual backends** — FAISS (default, fast) or ChromaDB (optional)
-- **Embedder hotswap** — switch between numpy TF-IDF, ONNX MiniLM, BERT, sentence-transformers at runtime
-- **MCP server** — 40+ JSON-RPC tools over stdio/SSE for AI agent control
-- **Knowledge graph** — temporal entity-relationship store with invalidation
-- **Memory layers** — agent diaries with hierarchical L0/L1/L2 stack
-- **File mining** — auto-extract entities from code, text, conversations
-- **Sync & dedup** — prune stale entities, detect duplicates
-- **i18n** — 14 locale translations for agent communication
-- **Palace graph** — cross-realm tunnels and traversal
-- **Zero external services** — everything runs locally
+- **Hybrid search** — vector similarity + FTS5 keyword matching with configurable ranking
+- **Dual vector backends** — FAISS (default, fast) or ChromaDB (HNSW, optional)
+- **Auto-picking embedder** — uses best available: sentence-transformers → pure numpy BERT → TF-IDF+SVD
+- **Swappable embedders** — switch at runtime between numpy, ONNX MiniLM, BERT, Gemma, spaCy
+- **Knowledge graph** — temporal entity-relationship triples with invalidation timelines
+- **Agent diaries** — per-agent temporal records with L0/L1/L2 memory layers
+- **File mining** — auto-extract entities from code, conversations, text
+- **MCP server** — 40+ JSON-RPC tools over stdio/SSE for AI agent integration
+- **Palace graph** — cross-realm tunnels with graph traversal
+- **Personas** — isolated memory realms per AI persona
+- **i18n** — 14 languages for agent-facing communication
+- **Docker** — official images on Docker Hub (`kilv/alt-memory`)
+
+---
 
 ## Installation
 
@@ -22,147 +31,155 @@ Local-first AI memory system with hybrid search, entity graph, MCP server, and 4
 pip install alt-memory
 ```
 
-With optional backends:
+This gives you FAISS + `tokenizers` (for numpy BERT embedder). On first use, it auto-selects the best embedder available.
 
-```bash
-pip install "alt-memory[chroma]"     # ChromaDB backend
-pip install "alt-memory[onnx]"        # ONNX MiniLM embedder
-pip install "alt-memory[all]"         # Everything
-```
+| Install | Backend | Embedder |
+|---------|---------|----------|
+| `pip install alt-memory` | FAISS | numpy BERT (all-MiniLM-L6-v2 via pure numpy) |
+| `pip install alt-memory[chroma]` | + ChromaDB | same |
+| `pip install alt-memory[onnx]` | same | + ONNX MiniLM / Gemma / BERT |
+| `pip install alt-memory[all]` | + ChromaDB | + ONNX + sentence-transformers |
 
-Requires Python ≥ 3.10. Default install includes `faiss-cpu`, `numpy`, `scipy`.
+### Extras explained
+
+| Extra | Packages |
+|-------|----------|
+| `[chroma]` | `chromadb>=1.5.4` |
+| `[onnx]` | `onnxruntime`, `huggingface_hub`, `transformers` |
+| `[all]` | chroma + onnx + `sentence-transformers` |
+
+Requirements: Python ≥ 3.10, Windows/Linux/macOS.
+
+---
 
 ## Quick Start — CLI
 
 ```bash
-# Initialize a dimension
+# Initialize
 alt-memory init
 
-# Add an entity
-alt-memory add --realm myproject --domain bugs --content "Login button freezes on Safari"
+# Store a memory
+alt-memory add --realm work --domain bugs --content "Login freezes on Safari 18.2"
 
 # Search (hybrid by default)
 alt-memory search "login safari" --limit 5
 
-# Get status
-alt-memory status
+# Add a knowledge graph fact
+alt-memory kg-add --subject LoginBug --predicate affects --object Safari
+alt-memory kg-query LoginBug
 
-# List realms and domains
-alt-memory realms
-alt-memory rooms --realm myproject
+# Write a diary entry
+alt-memory record --agent claude --entry "Investigated the Safari freeze"
+
+# Run the MCP server
+alt-memory mcp --transport stdio
 ```
+
+---
+
+## Auto-Detection: Best Embedder, Zero Config
+
+Alt Memory automatically picks the best embedder available at runtime. No configuration needed.
+
+```
+Priority: sentence-transformers → numpy BERT → TF-IDF+SVD
+Quality:  ★★★★★              → ★★★★         → ★★
+Speed:    ★★★★               → ★★★          → ★★★★★
+Deps:     PyTorch (~800MB)    → tokenizers   → none
+```
+
+**What happens when you `pip install alt-memory`:**
+- `tokenizers` is installed (lightweight, pure Python + Rust wheels for all platforms)
+- On first `alt-memory init`, the system detects no PyTorch → uses **numpy BERT** (all-MiniLM-L6-v2 via pure numpy inference)
+- Same model as sentence-transformers, no heavy deps
+
+**If you also install sentence-transformers:**
+```bash
+pip install sentence-transformers   # or pip install alt-memory[all]
+```
+The system auto-detects it on next start and switches to PyTorch-accelerated inference.
+
+**Force a specific embedder:**
+```bash
+export ALT_DEFAULT_EMBEDDER=numpy       # TF-IDF+SVD (lightest)
+export ALT_DEFAULT_EMBEDDER=minilm      # ONNX MiniLM (requires [onnx])
+export ALT_DEFAULT_EMBEDDER=numpy_bert  # Pure numpy BERT
+```
+
+---
+
+## Embedder Reference
+
+| Name | Quality | Speed | Dependencies | Platform |
+|------|---------|-------|-------------|----------|
+| `sentence` | ★★★★★ | ★★★★ | sentence-transformers + PyTorch | all |
+| `numpy_bert` | ★★★★ | ★★★ | tokenizers (included) | **all incl. Alpine** |
+| `minilm` | ★★★★ | ★★★★★ | onnxruntime `[onnx]` | glibc |
+| `embeddinggemma` | ★★★★★ | ★★★★ | onnxruntime `[onnx]` | glibc |
+| `bert` | ★★★★ | ★★★★ | onnxruntime or tokenizers `[onnx]` | all |
+| `spacy` | ★★★ | ★★★ | spacy + en_core_web_md | all |
+| `numpy` | ★★ | ★★★★★ | none (always available) | all |
+
+All embedders produce 384-dimensional vectors. Switch at runtime — entities are automatically re-embedded.
+
+---
 
 ## Backend Switching
 
-Swap between FAISS and ChromaDB at any time — all data persists in SQLite.
+Swap between FAISS and ChromaDB at runtime. All data persists in SQLite — only the vector index changes.
 
 ```bash
 # CLI
 alt-memory backend chroma
 
-# Python API
-from alt_memory import Dimension
+# Python
 d = Dimension(path="~/.alt-memory", backend="chroma")
-d.init()
 d.set_backend("faiss")  # hot-swap
 
-# MCP tool
-{"method": "tools/call", "params": {"name": "set_backend", "arguments": {"backend": "chroma"}}}
+# MCP
+{"name": "set_backend", "arguments": {"backend": "chroma"}}
 ```
 
-The backend is stored per-dimension in `dimension.json`. All entities, metadata, and FTS indexes are shared — only the vector index differs.
+---
 
-## Embedder Hotswap
-
-Switch embedding models without losing data:
-
-| Model | Description | Install |
-|-------|-------------|---------|
-| `numpy` | TF-IDF + SVD (default, always avail) | built-in |
-| `minilm` | ONNX all-MiniLM-L6-v2 (384 dim) | `alt-memory[onnx]` |
-| `bert` | ONNX BERT | `alt-memory[onnx]` |
-| `embedding-gemma` | Google Embedding Gemma | `alt-memory[onnx]` |
-| `sentence-transformers` | any HF sentence-transformers model | `pip install sentence-transformers` |
-| `spacy` | spaCy en_core_web_md | `pip install spacy` |
-
-```python
-d.set_embedder("minilm")      # re-embeds all entities automatically
-d.set_embedder("numpy")       # back to numpy
-d.set_embedder("sentence-transformers", model="all-MiniLM-L6-v2")
-```
-
-MCP: `{"name": "set_embedder", "arguments": {"model": "minilm"}}`
-
-## CLI Reference
-
-```
-init                          Initialize a new dimension
-status                        Show dimension status
-add --realm -w --domain -r --content -c [--meta --source]
-                              Add an entity
-search [query] [--realm -w] [--domain -r] [--limit] [--mode vector|keyword|hybrid]
-                              Search (default hybrid)
-get <entity_id>               Get an entity by ID
-list [--realm] [--domain] [--limit] [--offset]
-                              List entities
-realms                        List all realms
-rooms [--realm]               List domains
-delete <entity_id>            Delete an entity
-kg-add --subject --predicate --object
-                              Add KG fact
-kg-query [entity]             Query KG
-kg-invalidate --subject --predicate --object
-                              Invalidate KG fact
-kg-stats                      KG statistics
-diary --agent --entry         Write diary entry
-diary-read --agent            Read diary
-aaak <text>                   Compress text to AAAK
-mine --realm --domain <file>  Mine file into dimension
-sweep <path>                  Sweep .jsonl files
-sync [--dry-run] [--apply]    Prune stale entities
-repair [--integrity] [--vacuum] [--rebuild-fts]
-                              Repair utilities
-mcp [--transport stdio|sse] [--port 8316]
-                              Run MCP server
-```
-
-## MCP Server (AI Agent Control)
-
-Run the MCP server so AI agents can read/write your memory directly:
+## MCP Server (AI Agent Integration)
 
 ```bash
-alt-memory mcp --transport stdio
+alt-memory mcp --transport stdio          # for AI coding agents
+alt-memory mcp --transport sse --port 8316  # HTTP
 ```
 
-Or over HTTP (SSE):
+The server exposes 40+ JSON-RPC tools for memory operations. Configure it in your AI agent's MCP settings:
 
-```bash
-alt-memory mcp --transport sse --port 8316
+```json
+{
+  "mcpServers": {
+    "alt-memory": {
+      "command": "alt-memory",
+      "args": ["mcp", "--transport", "stdio"]
+    }
+  }
+}
 ```
 
-### MCP Tools (40+)
-
-The server exposes all dimension operations as JSON-RPC tools:
+### Key MCP tools
 
 | Tool | Description |
 |------|-------------|
 | `search` | Hybrid/vector/keyword search |
-| `get_status` | Dimension status |
-| `list_realms` / `create_realm` / `delete_realm` | Realm management |
-| `list_domains` / `create_domain` / `delete_domain` | Domain management |
-| `add_entity` / `get_entity` / `update_entity` / `delete_entity` / `list_entities` | Entity CRUD |
-| `check_duplicate` | Similarity check |
-| `set_backend` / `get_backend` | Backend swap |
-| `set_embedder` / `get_default_embedder` / `set_default_embedder` | Embedder control |
-| `kg_add` / `kg_query` / `kg_invalidate` / `kg_stats` / `kg_timeline` | Knowledge graph |
-| `diary_write` / `diary_read` / `memory_write` / `memory_read` / `memory_summarize` | Agent diaries |
-| `mine_file` / `mine_text` / `batch_mine` | File mining |
-| `aaak_compress` / `aaak_decompress` / `aaak_parse` | AAAK dialect |
-| `rebuild_fts` | FTS maintenance |
-| `create_tunnel` / `delete_tunnel` / `find_tunnels` / `follow_tunnels` / `list_tunnels` / `traverse` / `graph_stats` / `get_taxonomy` | Palace graph |
-| `sync` / `reconnect` / `hook_settings` | Maintenance |
-| `list_agents` / `get_people_map` | User management |
-| `get_aaak_spec` | AAAK specification |
+| `add_entity` / `get_entity` / `update_entity` / `delete_entity` | CRUD |
+| `set_backend` / `get_backend` | Backend control |
+| `set_embedder` / `get_default_embedder` | Embedder control |
+| `kg_add` / `kg_query` / `kg_invalidate` / `kg_stats` | Knowledge graph |
+| `record_write` / `record_read` | Agent diaries |
+| `mine_file` / `mine_text` | File mining |
+| `list_realms` / `list_domains` | Browsing |
+| `traverse` / `graph_stats` / `get_taxonomy` | Palace graph |
+| `sync` / `check_duplicate` | Maintenance |
+
+Full list: `alt-memory mcp --help` or inspect via `tools/list` after connecting.
+
+---
 
 ## Python API
 
@@ -172,64 +189,107 @@ from alt_memory import Dimension
 d = Dimension(path="~/.alt-memory")
 d.init()
 
-# CRUD
-eid = d.add_entity("realm", "domain", "content",
-                   metadata={"key": "val"}, source_file="/path/to/file")
-entity = d.get_entity(eid)
-d.update_entity(eid, content="updated", realm="newrealm")
-d.delete_entity(eid)
+# Store and search
+eid = d.add_entity("work", "bugs", "Login freezes on Safari",
+                   metadata={"priority": "high"})
+results = d.search("login safari", n_results=10, mode="hybrid")
 
-# Search (returns list of SearchResult with .id, .text, .distance, .realm, .domain, .metadata)
-results = d.search("query", n_results=10, mode="hybrid",
-                   realm="realm_filter", domain="domain_filter")
+# Knowledge graph
+d.kg.add("LoginBug", "affects", "Safari", valid_from="2026-05-01")
+facts = d.kg.query("LoginBug")
+
+# Agent diaries
+d.diary_write("claude", "Investigated the Safari freeze", topic="debugging")
+entries = d.diary_read("claude", last_n=5)
 
 # Backend & embedder control
 d.set_backend("chroma")
 d.set_embedder("minilm")
 
-# Knowledge graph
-d.kg.add("Alice", "works_on", "ProjectX", valid_from="2026-01-01")
-facts = d.kg.query("Alice")
-d.kg.invalidate("Alice", "works_on", "ProjectX")
+# File mining
+d.mine_file("work", "code", "src/auth.py")
 
-# Agent diaries
-d.diary_write("agent_name", "Entry text", topic="debugging")
-entries = d.diary_read("agent_name", last_n=5)
-
-# Status
-info = d.status()  # entities, realms, domains, embedder, fts_enabled
-
-# Sync & maintenance
+# Sync (prune stale entities from deleted files)
 d.sync(project_dir="/path/to/repo", apply=True)
-d.check_duplicate("new content")
-d.rebuild_fts()
 ```
+
+---
+
+## Docker
+
+```bash
+# FAISS + numpy BERT (Alpine, ~117MB content)
+docker run -v ~/.alt-memory:/root/.alt-memory kilv/alt-memory:alpine mcp
+
+# Full install (Debian, includes chroma + onnx)
+docker run -v ~/.alt-memory:/root/.alt-memory kilv/alt-memory:latest mcp
+```
+
+Tags:
+- `kilv/alt-memory:latest` — Debian-based, full install
+- `kilv/alt-memory:4.5.0` — versioned Debian
+- `kilv/alt-memory:alpine` — Alpine-based, FAISS + numpy BERT (~117MB)
+- `kilv/alt-memory:4.5.0-alpine` — versioned Alpine
+
+---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────┐
-│                  MCP Server                  │
-│  (JSON-RPC over stdio/SSE — 40+ tools)      │
-├─────────────────────────────────────────────┤
-│                  Dimension                   │
-│  (orchestrator — realms, domains, entities)  │
-├──────────────────┬──────────────────────────┤
-│  Vector Store     │  SQLite + FTS5           │
-│  (FAISS/Chroma)   │  (metadata, content, KG) │
-├──────────────────┴──────────────────────────┤
-│  Embedder Layer                              │
-│  (numpy / minilm / BERT / sentence-transform)│
-└─────────────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│              MCP Server (stdio/SSE)           │
+│         40+ JSON-RPC tools for AI agents      │
+├──────────────────────────────────────────────┤
+│                  Dimension                    │
+│    orchestrates realms, domains, entities     │
+├───────────────────┬──────────────────────────┤
+│   Vector Store    │   SQLite + FTS5           │
+│ (FAISS / Chroma)  │ (metadata, content, KG)  │
+├───────────────────┴──────────────────────────┤
+│           Embedder Layer (auto-pick)          │
+│  sentence ─▶ numpy BERT ─▶ TF-IDF+SVD        │
+└──────────────────────────────────────────────┘
 ```
 
-Each dimension is a directory containing:
-- `entities.db` — SQLite with FTS5 for content + metadata
-- `faiss.index` or `chroma/` — vector index
-- `dimension.json` — configuration (backend, embedder)
-- `nodes/` — packed entity storage
-- `entity_registry.json` — entity name mappings
-- `knowledge_graph.json` — relationship store
+Each dimension is a directory on disk:
+```
+~/.alt-memory/
+├── entities.db           # SQLite + FTS5
+├── index.faiss           # FAISS vector index (or chroma/)
+├── dimension.json        # config (backend, embedder)
+├── nodes/                # packed entity storage
+├── entity_registry.json  # entity name → ID mappings
+└── knowledge_graph.json  # relationship store
+```
+
+---
+
+## CLI Reference
+
+```
+alt-memory init                  Initialize a new dimension
+alt-memory status                Show dimension status
+alt-memory add -w <realm> -r <domain> -c <content>
+alt-memory search <query>        Search (hybrid default)
+alt-memory get <id>              Get entity by ID
+alt-memory list                  List entities
+alt-memory realms                List realms
+alt-memory rooms                 List domains
+alt-memory delete <id>           Delete entity
+alt-memory kg-add --subject --predicate --object
+alt-memory kg-query <entity>     Query knowledge graph
+alt-memory kg-invalidate ...     Invalidate KG fact
+alt-memory kg-stats              KG statistics
+alt-memory record --agent --entry
+alt-memory record-read --agent   Read diary
+alt-memory mine -w <realm> -r <domain> <file>
+alt-memory sync [--apply]        Prune stale entities
+alt-memory mcp                   Run MCP server
+alt-memory repair                Repair utilities
+alt-memory aaak <text>           AAAK compression
+```
+
+---
 
 ## License
 

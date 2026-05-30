@@ -4,24 +4,27 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "alt-memory"
-version = "4.4.0"
+version = "4.5.0"
 description = "Local-first AI memory system — realms, domains, entities, hybrid search, entity graph, MCP"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Alt Memory"},
 ]
+readme = "README.md"
 dependencies = [
     "faiss-cpu>=1.7.0",
     "numpy>=1.24.0",
     "scipy>=1.10.0",
     "pyyaml>=6.0",
+    "pathspec>=0.10.0",
+    "tokenizers>=0.15.0",
 ]
 
 [project.optional-dependencies]
 chroma = ["chromadb>=1.5.4,<2"]
 onnx = ["onnxruntime>=1.15.0", "huggingface_hub>=0.20.0", "transformers>=4.35.0"]
-all = ["alt-memory[chroma]", "alt-memory[onnx]"]
+all = ["alt-memory[chroma]", "alt-memory[onnx]", "sentence-transformers>=3.0.0"]
 
 [project.scripts]
 alt-memory = "alt_memory.cli:main"
@@ -29,6 +32,11 @@ alt-memory-mcp = "alt_memory.mcp_server:main"
 
 [tool.setuptools.packages.find]
 include = ["alt_memory*"]
+
+[project.urls]
+Homepage = "https://github.com/kilvz/alt-memory"
+Source = "https://github.com/kilvz/alt-memory"
+BugTracker = "https://github.com/kilvz/alt-memory/issues"
 
 [tool.setuptools.package-data]
 alt_memory = ["i18n/*.json"]

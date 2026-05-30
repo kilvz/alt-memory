@@ -1,16 +1,33 @@
-FROM alpine:3.21
+# alt-memory — Alpine-based Docker image
+# Uses python:3.12-alpine for minimal footprint.
+# Optional: --build-arg EXTRAS=chroma,all  (requires py3-onnxruntime from apk)
 
-RUN apk add --no-cache python3 py3-pip py3-numpy py3-scipy git
+FROM python:3.12-alpine AS builder
+WORKDIR /build
 
-WORKDIR /test
-COPY . /test/alt-memory
+RUN apk add --no-cache build-base gcc g++ musl-dev linux-headers git && rm -rf /var/cache/apk/*
+COPY . .
 
-RUN sed -i 's/setuptools.backends._legacy:_Backend/setuptools.build_meta/' /test/alt-memory/pyproject.toml
+ARG EXTRAS=""
+RUN if [ -z "$EXTRAS" ]; then \
+        pip install --no-cache-dir .; \
+    elif [ "$EXTRAS" = "chroma" ] || [ "$EXTRAS" = "all" ]; then \
+        apk add --no-cache py3-onnxruntime && \
+        pip install --no-cache-dir . && \
+        pip install --no-cache-dir chromadb==1.5.9 --no-deps && \
+        pip install --no-cache-dir pydantic pydantic-settings uvicorn[standard] pybase64 build packaging typing-extensions \
+            importlib-metadata bcrypt kubernetes overrides pulsar-client requests rich tenacity tokenizers tqdm \
+            typing-inspect; \
+    fi
 
-# Install with deps (faiss now has musl wheels)
-RUN pip install --break-system-packages /test/alt-memory 2>&1
+FROM python:3.12-alpine
+RUN apk add --no-cache ca-certificates && rm -rf /var/cache/apk/*
 
-# Test --help
-RUN python3 -m alt_memory.cli --help 2>&1
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin/alt-memory /usr/local/bin/alt-memory
+COPY --from=builder /usr/local/bin/alt-memory-mcp /usr/local/bin/alt-memory-mcp
 
-CMD ["python3", "-m", "alt_memory.cli", "--help"]
+VOLUME ["/root/.alt-memory"]
+EXPOSE 8100
+ENTRYPOINT ["alt-memory"]
+CMD ["--help"]

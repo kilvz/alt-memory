@@ -187,7 +187,7 @@ class ChromaStore:
                 offset += batch_size
             return max_num
         except Exception:
-            pass
+            logger.warning("chroma_store.next_id failed, returning 0", exc_info=True)
         return 0
 
     def _save_seq(self) -> None:

@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 
 CURRENT_SCHEMA_VERSION = 1
 META_TABLE = "_meta"
+_VALID_META_TABLES = frozenset({"_meta"})
+
+
+def _validate_meta_table(table: str) -> None:
+    if table not in _VALID_META_TABLES:
+        raise ValueError(f"Invalid meta table name: {table!r}")
 
 
 # ── Version tracking ───────────────────────────────────────────────────────
@@ -42,6 +48,7 @@ def _open_db(dim_path: str) -> sqlite3.Connection:
 
 
 def _ensure_meta_table(conn: sqlite3.Connection) -> None:
+    _validate_meta_table(META_TABLE)
     conn.execute(
         f"CREATE TABLE IF NOT EXISTS {META_TABLE} (key TEXT PRIMARY KEY, value TEXT)"
     )
@@ -138,120 +145,3 @@ def migrate_schema(dim_path: str, dry_run: bool = False) -> dict:
 
 
 # ── FAISS rebuild ──────────────────────────────────────────────────────────
-
-
-def rebuild_faiss(dim_path: str) -> dict:
-    """Rebuild the FAISS index from dimension.db SQLite content.
-
-    Reads all entity texts, re-embeds them, and writes a fresh
-    ``data/index.faiss`` + ``data/metadata.db``. Existing data is
-    replaced. Useful when the FAISS index is corrupted or missing.
-    """
-    from alt_memory.backends.faiss_store import FaissStore
-
-    base = Path(dim_path).expanduser().resolve()
-    data_dir = base / "data"
-
-    # Read all entities
-    conn = _open_db(dim_path)
-    try:
-        rows = conn.execute(
-            "SELECT id, content, metadata FROM entities ORDER BY rowid"
-        ).fetchall()
-    finally:
-        conn.close()
-
-    if not rows:
-        return {"ok": True, "vectors_rebuilt": 0, "message": "No entities to rebuild"}
-
-    ids = []
-    texts = []
-    metadatas = []
-    for r in rows:
-        ids.append(r["id"])
-        texts.append(r["content"])
-        try:
-            metadatas.append(json.loads(r["metadata"]) if r["metadata"] else {})
-        except (json.JSONDecodeError, TypeError):
-            metadatas.append({})
-
-    embedder = get_embedder()
-    vectors = embedder.embed(texts)
-
-    data_dir.mkdir(parents=True, exist_ok=True)
-    store = FaissStore(str(data_dir), dimension=vectors.shape[1])
-    store.clear()
-    store.add(ids, texts, metadatas, vectors)
-
-    n = store.count()
-    store.close()
-
-    logger.info("Rebuilt FAISS index with %d vectors", n)
-    return {"ok": True, "vectors_rebuilt": n}
-
-
-# ── Orchestrator ────────────────────────────────────────────────────────────
-
-
-def migrate(dim_path: str, dry_run: bool = False, confirm: bool = False) -> dict:
-    """Run all pending schema migrations.
-
-    Returns a dict with ``migrations_applied``, ``version_before``,
-    ``version_after``, and ``rebuild_triggered``.
-    """
-    result = migrate_schema(dim_path, dry_run=dry_run)
-    return result
-
-
-# ── CLI integration ────────────────────────────────────────────────────────
-
-
-def status(dim_path: str) -> dict:
-    """Detailed schema-version status of the dimension."""
-    base = Path(dim_path).expanduser().resolve()
-    dim_db_path = base / "dimension.db"
-    data_dir = base / "data"
-    index_file = data_dir / "index.faiss"
-    meta_file = data_dir / "metadata.db"
-
-    info: dict = {
-        "path": str(base),
-        "dim_db_exists": dim_db_path.exists(),
-        "index_exists": index_file.exists(),
-        "metadata_db_exists": meta_file.exists(),
-    }
-
-    if not dim_db_path.exists():
-        info["version"] = 0
-        info["message"] = "Dimension not initialized"
-        return info
-
-    version = get_dimension_version(str(dim_path))
-    info["version"] = version
-    info["latest_version"] = CURRENT_SCHEMA_VERSION
-    info["up_to_date"] = version >= CURRENT_SCHEMA_VERSION
-
-    # Count items
-    conn = _open_db(dim_path)
-    try:
-        info["entities"] = conn.execute("SELECT COUNT(*) FROM entities").fetchone()[0]
-        info["realms"] = conn.execute("SELECT COUNT(*) FROM realms").fetchone()[0]
-        info["domains"] = conn.execute("SELECT COUNT(*) FROM domains").fetchone()[0]
-    except sqlite3.Error:
-        pass
-    finally:
-        conn.close()
-
-    # FAISS count
-    if index_file.exists() and meta_file.exists():
-        try:
-            store_conn = sqlite3.connect(str(meta_file))
-            row = store_conn.execute("SELECT COUNT(*) FROM pos_map").fetchone()
-            info["vectors"] = row[0] if row else 0
-            store_conn.close()
-        except sqlite3.Error:
-            info["vectors"] = None
-    else:
-        info["vectors"] = 0
-
-    return info

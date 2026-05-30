@@ -263,7 +263,7 @@ def mine_dimension_lock(dim_path: str):
                     import fcntl
                     fcntl.flock(lf, fcntl.LOCK_UN)
             except Exception:
-                pass
+                logger.warning("Failed to unlock lock file", exc_info=True)
         lf.close()
 
 
@@ -395,6 +395,21 @@ class Dimension:
             old_backend = self._backend
             self._backend = backend
 
+            info = {"backend": backend, "previous_backend": old_backend}
+
+            if reindex:
+                try:
+                    count = self._reindex_embeddings()
+                except Exception:
+                    self._backend = old_backend
+                    raise
+                info["reindexed"] = count
+            else:
+                if self._store:
+                    self._store.close()
+                self._store = self._create_store()
+                info["reindexed"] = 0
+
             config_path = self._base / "dimension.json"
             config = {}
             if config_path.exists():
@@ -403,17 +418,6 @@ class Dimension:
             config["backend"] = backend
             with open(config_path, "w") as f:
                 json.dump(config, f)
-
-            info = {"backend": backend, "previous_backend": old_backend}
-
-            if reindex:
-                count = self._reindex_embeddings()
-                info["reindexed"] = count
-            else:
-                if self._store:
-                    self._store.close()
-                self._store = self._create_store()
-                info["reindexed"] = 0
 
         return info
 
@@ -496,7 +500,7 @@ class Dimension:
                 try:
                     save(str(self._data_dir))
                 except Exception:
-                    pass
+                    logger.warning("Embedder save failed", exc_info=True)
 
     def _load_embedder(self, is_new: bool = False, device: Optional[str] = None) -> Any:
         config_path = self._base / "dimension.json"
@@ -1554,15 +1558,16 @@ def _get_dimension_persona(dim_path: str) -> str:
         if cached is not None:
             return cached
     cfg_path = Path(dim_path) / "persona.json"
-    if cfg_path.exists():
-        try:
-            data = json.loads(cfg_path.read_text())
-            name = data.get("persona", "")
-            with _persona_cache_lock:
-                _DIMENSION_PERSONA_CACHE[dim_path] = name
-            return name
-        except (json.JSONDecodeError, OSError):
-            pass
+    try:
+        data = json.loads(cfg_path.read_text())
+        name = data.get("persona", "")
+        with _persona_cache_lock:
+            _DIMENSION_PERSONA_CACHE[dim_path] = name
+        return name
+    except FileNotFoundError:
+        pass
+    except (json.JSONDecodeError, OSError):
+        pass
     return ""
 
 

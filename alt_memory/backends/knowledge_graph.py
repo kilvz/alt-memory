@@ -83,6 +83,7 @@ class KnowledgeGraph:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = None
         self._lock = threading.Lock()
+        self._conn_lock = threading.Lock()
         self._closed = False
         self._init_db()
 
@@ -130,8 +131,10 @@ class KnowledgeGraph:
         if self._closed:
             raise RuntimeError("KnowledgeGraph is closed")
         if self._connection is None:
-            self._connection = sqlite3.connect(str(self._db_path), check_same_thread=False)
-            self._connection.row_factory = sqlite3.Row
+            with self._conn_lock:
+                if self._connection is None:
+                    self._connection = sqlite3.connect(str(self._db_path), check_same_thread=False)
+                    self._connection.row_factory = sqlite3.Row
         return self._connection
 
     @staticmethod

@@ -7,6 +7,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 from alt_memory.config import AltMemoryConfig
 from alt_memory.miner import _extract_entities_for_metadata

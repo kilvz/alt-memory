@@ -11,8 +11,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+_VALID_TABLES = frozenset({"entities", "entities_fts"})
+
+
+def _validate_table(table: str) -> None:
+    if table not in _VALID_TABLES:
+        raise ValueError(f"Invalid table name: {table!r}")
+
 
 def sqlite_entity_count(db_path: str, table: str = "entities") -> Optional[int]:
+    _validate_table(table)
     """Count rows in the entities table as ground truth.
 
     Returns ``None`` when the DB is unreadable (missing file, locked,
@@ -96,6 +104,7 @@ def run_vacuum(db_path: str) -> None:
 
 
 def rebuild_fts5(db_path: str, fts_table: str = "entities_fts") -> None:
+    _validate_table(fts_table)
     """Rebuild an FTS5 virtual table index.
 
     After mass deletes or collection rebuilds the FTS5 shadow tables can
@@ -118,6 +127,7 @@ def rebuild_fts5(db_path: str, fts_table: str = "entities_fts") -> None:
             if fts_table in tables:
                 conn.execute(
                     f"INSERT INTO {fts_table}({fts_table}) VALUES('rebuild')"
+                # fts_table validated by _validate_table in caller scope
                 )
                 conn.commit()
                 logger.info("FTS5 index %s rebuilt", fts_table)

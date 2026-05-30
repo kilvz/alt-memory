@@ -572,14 +572,15 @@ def _pid_alive(pid: int) -> bool:
 def _cleanup_mine_pid_file(dim_path: str) -> None:
     pid_file = _mine_pid_file_path(dim_path)
     try:
-        if os.path.exists(pid_file):
-            with open(pid_file) as f:
-                content = f.read().strip()
-            if content:
-                parts = content.split()
-                pid_token = parts[0] if parts else ""
-                if pid_token.isdigit() and int(pid_token) == os.getpid():
-                    os.unlink(pid_file)
+        with open(pid_file) as f:
+            content = f.read().strip()
+        if content:
+            parts = content.split()
+            pid_token = parts[0] if parts else ""
+            if pid_token.isdigit() and int(pid_token) == os.getpid():
+                os.unlink(pid_file)
+    except FileNotFoundError:
+        pass
     except OSError:
         pass
 

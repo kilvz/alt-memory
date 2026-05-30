@@ -291,13 +291,10 @@ def _claim_mine_slot(cmd: list[str]) -> Optional[Path]:
     try:
         pid_file.unlink()
     except FileNotFoundError:
-        pass
+        return _create_mine_slot_with_placeholder(pid_file)
     except OSError:
         return None
-    try:
-        return _create_mine_slot_with_placeholder(pid_file)
-    except FileExistsError:
-        return None
+    return _create_mine_slot_with_placeholder(pid_file)
 
 
 def _spawn_mine(cmd: list) -> None:

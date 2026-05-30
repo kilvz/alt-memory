@@ -502,6 +502,7 @@ class OnnxEmbedder:
         self._model_name = model_name
         self._session = None
         self._tokenizer = None
+        self._input_names: Optional[list[str]] = None
 
     @property
     def dimension(self) -> int:
@@ -523,12 +524,14 @@ class OnnxEmbedder:
             max_length=256,
             return_tensors="np",
         )
-        outputs = self._session.run(
-            None, {
-                "input_ids": encs["input_ids"],
-                "attention_mask": encs["attention_mask"],
-            }
-        )
+        feed_dict: dict[str, "np.ndarray"] = {
+            "input_ids": encs["input_ids"],
+            "attention_mask": encs["attention_mask"],
+        }
+        # Some ONNX exports include token_type_ids as a required input
+        if self._input_names and "token_type_ids" in self._input_names:
+            feed_dict["token_type_ids"] = np.zeros_like(encs["input_ids"])
+        outputs = self._session.run(None, feed_dict)
         # last_hidden_state mean pooling
         token_emb = outputs[0]
         mask = encs["attention_mask"][:, :, np.newaxis].astype(np.float32)
@@ -567,9 +570,10 @@ class OnnxEmbedder:
             self._session = self._load_direct_onnx(model_id, ort, np)
 
         self._tokenizer = AutoTokenizer.from_pretrained(model_id)
+        self._input_names = [inp.name for inp in self._session.get_inputs()]
         logger.info(
-            "OnnxEmbedder loaded: model=%s device=%s",
-            self._model_name, self._device_label,
+            "OnnxEmbedder loaded: model=%s device=%s inputs=%s",
+            self._model_name, self._device_label, self._input_names,
         )
 
     def _load_direct_onnx(
@@ -591,7 +595,9 @@ class OnnxEmbedder:
                 + "-ONNX",
                 filename="model.onnx",
             )
-        return ort.InferenceSession(model_path, providers=self._providers)
+        session = ort.InferenceSession(model_path, providers=self._providers)
+        self._input_names = [inp.name for inp in session.get_inputs()]
+        return session
 
 
 # ── Embeddinggemma-300m ONNX (optional — requires onnxruntime + huggingface_hub) ────

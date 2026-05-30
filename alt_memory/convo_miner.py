@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Optional
 
 from alt_memory.normalize import normalize
-from alt_memory.dimension import Dimension, SKIP_DIRS, mine_lock, mine_dimension_lock, MineAlreadyRunning
+from alt_memory.dimension import Dimension, SKIP_DIRS, mine_lock, mine_dimension_lock, MineAlreadyRunning, ENTITY_UPSERT_BATCH_SIZE, DEFAULT_MAX_FILE_SIZE as MAX_FILE_SIZE
+from alt_memory.config import DEFAULT_CHUNK_SIZE as CHUNK_SIZE
 
 logger = logging.getLogger("alt_memory")
 
@@ -65,18 +66,10 @@ CONVO_EXTENSIONS = {
 }
 
 MIN_CHUNK_SIZE = 30
-CHUNK_SIZE = 800  # chars per entity — align with miner.py
 _LINE_GROUP_SIZE = 25  # lines per fallback group when no paragraph breaks
 _LINE_FALLBACK_MIN_NEWLINES = 20  # trigger line-group fallback above this newline count
-ENTITY_UPSERT_BATCH_SIZE = 1000
-MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB — skip files larger than this.
-# Matches miner.py at 500 MB. Long Claude Code sessions, multi-year
-# ChatGPT exports, and lifetime Slack dumps routinely exceed 10 MB; the
-# cap at that level silently dropped them with `continue`. Per-entity
-# size is bounded by CHUNK_SIZE, but larger source files still produce
-# more drawers and therefore more embedding/storage work — and content
-# is normalized and loaded fully into memory before chunking, so memory
-# use also scales with source size.
+# ENTITY_UPSERT_BATCH_SIZE and MAX_FILE_SIZE imported from dimension.py
+# (reuses ENTITY_UPSERT_BATCH_SIZE as-is; MAX_FILE_SIZE maps to DEFAULT_MAX_FILE_SIZE)
 
 
 def _register_file(dim, source_file: str, realm: str, agent: str, extract_mode: str):

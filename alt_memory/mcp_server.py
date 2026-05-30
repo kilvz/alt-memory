@@ -718,6 +718,115 @@ def _build_tool_definitions() -> list[dict]:
                 "required": ["map"],
             },
         },
+        {
+            "name": "batch_add_entities",
+            "description": "Add multiple entities in a single transaction",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entities": {
+                        "type": "array",
+                        "description": "List of entity objects, each with realm, domain, content, and optional metadata/source_file/entity_id",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "realm": {"type": "string"},
+                                "domain": {"type": "string"},
+                                "content": {"type": "string"},
+                                "metadata": {"type": "object"},
+                                "source_file": {"type": "string"},
+                                "entity_id": {"type": "string"},
+                            },
+                            "required": ["realm", "domain", "content"],
+                        },
+                    },
+                },
+                "required": ["entities"],
+            },
+        },
+        {
+            "name": "delete_entities",
+            "description": "Delete multiple entities by their IDs in a single operation",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entity_ids": {
+                        "type": "array",
+                        "description": "List of entity IDs to delete",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["entity_ids"],
+            },
+        },
+        {
+            "name": "get_persona",
+            "description": "Get the current active persona name",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "set_persona",
+            "description": "Set the active persona, creating a persona_<name> realm if needed",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Persona name"},
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "switch_persona",
+            "description": "Alias for set_persona — switch to a different active persona",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Persona name"},
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "import_entities",
+            "description": "Import entities from a JSON-serializable list",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "entities": {
+                        "type": "array",
+                        "description": "List of entity dicts (each must have realm, domain, content)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "realm": {"type": "string"},
+                                "domain": {"type": "string"},
+                                "content": {"type": "string"},
+                                "metadata": {"type": "object"},
+                                "source_file": {"type": "string"},
+                                "entity_id": {"type": "string"},
+                            },
+                            "required": ["realm", "domain", "content"],
+                        },
+                    },
+                    "overwrite": {
+                        "type": "boolean",
+                        "description": "If true, use provided entity_id (overwrites existing); otherwise auto-generate",
+                    },
+                },
+                "required": ["entities"],
+            },
+        },
+        {
+            "name": "export_collection",
+            "description": "Export all entities as a JSON-serializable list",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "realm": {"type": "string", "description": "Filter by realm (optional)"},
+                    "domain": {"type": "string", "description": "Filter by domain (optional)"},
+                },
+            },
+        },
     ]
     _TOOL_DEFINITIONS.extend(extra_tools)
     return _TOOL_DEFINITIONS
@@ -839,6 +948,14 @@ class MCPServer:
         self._register("list_agents", self._list_agents, [])
         self._register("get_people_map", self._get_people_map, [])
         self._register("set_people_map", self._set_people_map, ["map"])
+
+        self._register("batch_add_entities", self._batch_add_entities, ["entities"])
+        self._register("delete_entities", self._delete_entities, ["entity_ids"])
+        self._register("get_persona", self._get_persona, [])
+        self._register("set_persona", self._set_persona, ["name"])
+        self._register("switch_persona", self._switch_persona, ["name"])
+        self._register("import_entities", self._import_entities, ["entities"])
+        self._register("export_collection", self._export_collection, [])
 
     def handle_request(self, raw: str) -> str | None:
         """Process one JSON-RPC request line, return JSON response string.
@@ -1365,6 +1482,51 @@ class MCPServer:
         from alt_memory.config import AltMemoryConfig
         AltMemoryConfig().save_people_map(params.get("map", {}))
         return {"saved": True}
+
+    def _batch_add_entities(self, params: dict) -> dict:
+        entities = params["entities"]
+        batch: list[tuple[str, str, str, dict, str, Optional[str]]] = []
+        for ent in entities:
+            realm = ent["realm"]
+            domain = ent["domain"]
+            content = ent["content"]
+            meta = ent.get("metadata") or {}
+            source_file = ent.get("source_file") or ""
+            entity_id = ent.get("entity_id")
+            batch.append((realm, domain, content, meta, source_file, entity_id))
+        ids = self.dim.batch_add_entities(batch)
+        self._invalidate_metadata_cache()
+        return {"entity_ids": ids, "count": len(ids)}
+
+    def _delete_entities(self, params: dict) -> dict:
+        entity_ids = params["entity_ids"]
+        count = self.dim.delete_entities(entity_ids)
+        self._invalidate_metadata_cache()
+        return {"deleted": count}
+
+    def _get_persona(self, params: dict) -> dict:
+        return {"persona": self.dim.get_persona()}
+
+    def _set_persona(self, params: dict) -> dict:
+        result = self.dim.set_persona(params["name"])
+        return result
+
+    def _switch_persona(self, params: dict) -> dict:
+        return self.dim.switch_persona(params["name"])
+
+    def _import_entities(self, params: dict) -> dict:
+        count = self.dim.import_entities(
+            params["entities"],
+            overwrite=params.get("overwrite", False),
+        )
+        self._invalidate_metadata_cache()
+        return {"imported": count}
+
+    def _export_collection(self, params: dict) -> list:
+        return self.dim.export_collection(
+            realm=params.get("realm"),
+            domain=params.get("domain"),
+        )
 
     # -- Helpers ----------------------------------------------------------------
 

@@ -488,7 +488,7 @@ class Dimension:
             self._initialized = False
 
     def _save_embedder(self):
-        if self._embedder and self._embedder.is_fitted:
+        if self._embedder and getattr(self._embedder, "is_fitted", True):
             save = getattr(self._embedder, "save", None)
             if save:
                 try:
@@ -1469,6 +1469,91 @@ class Dimension:
             "last_saved_at": last_time,
             "last_content_preview": preview,
         }
+
+    # ---- Bulk import / export ------------------------------------------------
+
+    def export_collection(self, realm: Optional[str] = None,
+                          domain: Optional[str] = None) -> list[dict]:
+        """Export all entities as a JSON-serializable list of dicts."""
+        rows = self.list_entities(realm=realm, domain=domain, limit=10_000_000, offset=0)
+        return rows
+
+    def import_entities(self, entities: list[dict], overwrite: bool = False) -> int:
+        """Import entities from a list of dicts. Each dict must have
+        ``realm``, ``domain``, ``content``. Optional keys: ``metadata``,
+        ``entity_id``, ``source_file``.
+
+        When ``overwrite=False`` (default), entities whose IDs already exist
+        are skipped. When ``overwrite=True``, existing entities are replaced.
+
+        Returns the number of entities imported.
+        """
+        batch: list[tuple[str, str, str, dict, str, Optional[str]]] = []
+        existing: set[str] = set()
+        if not overwrite:
+            existing_ids = self._db_execute("SELECT id FROM entities").fetchall()
+            existing = {r[0] for r in existing_ids}
+
+        for ent in entities:
+            realm = ent.get("realm", "")
+            domain = ent.get("domain", "")
+            content = ent.get("content", "")
+            if not content.strip():
+                continue
+            meta = ent.get("metadata") or {}
+            source_file = ent.get("source_file") or ""
+            entity_id = ent.get("entity_id") or ent.get("id")
+            if entity_id and entity_id in existing:
+                continue
+            batch.append((realm, domain, content, meta, source_file, entity_id))
+        if not batch:
+            return 0
+        ids = self.batch_add_entities(batch)
+        return len(ids)
+
+    # ---- Persona -------------------------------------------------------------
+
+    def get_persona(self) -> str:
+        """Return the current active persona name, or empty string if unset."""
+        return _get_dimension_persona(str(self._base))
+
+    def set_persona(self, name: str) -> dict:
+        """Set the active persona. Creates a ``persona_<name>`` realm if needed."""
+        if not name or not name.strip():
+            raise ValueError("persona name must be non-empty")
+        name = _sanitize(name, "name")
+        self.get_or_create_realm(f"persona_{name}", f"Persona: {name}")
+        _set_dimension_persona(str(self._base), name)
+        return {"persona": name}
+
+    def switch_persona(self, name: str) -> dict:
+        """Alias for ``set_persona``."""
+        return self.set_persona(name)
+
+
+_DIMENSION_PERSONA_CACHE: dict[str, str] = {}
+
+
+def _get_dimension_persona(dim_path: str) -> str:
+    cached = _DIMENSION_PERSONA_CACHE.get(dim_path)
+    if cached is not None:
+        return cached
+    cfg_path = Path(dim_path) / "persona.json"
+    if cfg_path.exists():
+        try:
+            data = json.loads(cfg_path.read_text())
+            name = data.get("persona", "")
+            _DIMENSION_PERSONA_CACHE[dim_path] = name
+            return name
+        except (json.JSONDecodeError, OSError):
+            pass
+    return ""
+
+
+def _set_dimension_persona(dim_path: str, name: str) -> None:
+    cfg_path = Path(dim_path) / "persona.json"
+    cfg_path.write_text(json.dumps({"persona": name}, indent=2))
+    _DIMENSION_PERSONA_CACHE[dim_path] = name
 
 
 # ==================== Closet-line entity extraction (for record_ingest) ====================

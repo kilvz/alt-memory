@@ -14,6 +14,7 @@ from pathlib import Path
 
 from alt_memory.entity_detector import EntityDetector
 from alt_memory.backends.knowledge_graph import KnowledgeGraph
+from alt_memory.dimension import SKIP_DIRS
 
 DEFAULT_REALMS = {
     "work": ["projects", "clients", "team", "decisions", "research"],
@@ -178,10 +179,9 @@ def _scan_for_detection(directory: str) -> list:
     """Walk directory and return list of text file contents for entity detection."""
     import os
     texts = []
-    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
     text_exts = {".txt", ".md", ".rst", ".py", ".js", ".ts", ".json", ".yaml", ".yml"}
     for root, dirs, filenames in os.walk(directory):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for fn in filenames:
             if Path(fn).suffix.lower() not in text_exts:
                 continue

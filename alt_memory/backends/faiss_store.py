@@ -1,4 +1,9 @@
-"""FAISS vector store with SQLite metadata + vector persistence."""
+"""FAISS vector store with SQLite metadata + vector persistence.
+
+Uses ``IndexIDMap`` so delete/upsert are O(1) ``remove_ids()`` instead of
+full index rebuilds. The ``pos_map`` table was dropped in v4.3.1 — each doc
+stores its stable ``faiss_id`` directly.
+"""
 
 import json
 import logging
@@ -28,7 +33,7 @@ from alt_memory.backends.base import DEFAULT_DIM
 
 
 class FaissStore:
-    """Persistent vector store backed by FAISS + SQLite."""
+    """Persistent vector store backed by ``IndexIDMap(IndexFlatIP)`` + SQLite."""
 
     def __init__(self, path: str, dimension: int = DEFAULT_DIM):
         self.path = Path(path)
@@ -38,29 +43,41 @@ class FaissStore:
 
         self._db_path = self.path / "metadata.db"
         self._init_db()
+        self._migrate_schema()
 
         index_path = self.path / "index.faiss"
         if index_path.exists():
-            self.index = faiss.read_index(str(index_path))
+            loaded = faiss.read_index(str(index_path))
+            if isinstance(loaded, faiss.IndexIDMap):
+                self.index = loaded
+            else:
+                logger.info(
+                    "Wrapping legacy IndexFlatIP in IndexIDMap (%d vectors)",
+                    loaded.ntotal,
+                )
+                self.index = faiss.IndexIDMap(loaded)
             logger.info("Loaded FAISS index with %d vectors", self.index.ntotal)
         else:
-            self.index = faiss.IndexFlatIP(dimension)
-            logger.info("Created new FAISS flat index (dim=%d)", dimension)
+            self.index = faiss.IndexIDMap(faiss.IndexFlatIP(dimension))
+            logger.info("Created new IndexIDMap(IndexFlatIP) (dim=%d)", dimension)
 
         self._seq_path = self.path / "seq.txt"
         self._seq = self._load_seq()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def add(self, ids: list[str], texts: list[str], metadatas: list[dict],
             embeddings: np.ndarray) -> None:
         if len(ids) == 0:
             return
-        n = len(ids)
         embeddings = np.asarray(embeddings, dtype=np.float32).copy()
         faiss.normalize_L2(embeddings)
         with self._lock:
-            start = self.index.ntotal
-            self.index.add(embeddings)
-            self._write_docs(ids, texts, metadatas, embeddings, start)
+            faiss_ids = self._alloc_faiss_ids(len(ids))
+            self.index.add_with_ids(embeddings, faiss_ids)
+            self._write_docs(ids, texts, metadatas, embeddings, faiss_ids)
             self._save()
 
     def upsert(self, ids: list[str], texts: list[str], metadatas: list[dict],
@@ -71,24 +88,17 @@ class FaissStore:
         faiss.normalize_L2(embeddings)
         with self._lock:
             existing = set(self._get_existing_ids(ids))
-            if not existing:
-                start = self.index.ntotal
-                self.index.add(embeddings)
-                self._write_docs(ids, texts, metadatas, embeddings, start)
-                self._save()
-                return
-            placeholders = ",".join("?" * len(existing))
-            self._db.execute(f"DELETE FROM docs WHERE id IN ({placeholders})", list(existing))
-            self._db.execute(f"DELETE FROM pos_map WHERE doc_id IN ({placeholders})", list(existing))
-            self._rebuild_index()
-            start = self.index.ntotal
-            self.index.add(embeddings)
-            self._write_docs(ids, texts, metadatas, embeddings, start)
+            if existing:
+                self._remove_by_doc_ids(list(existing))
+            faiss_ids = self._alloc_faiss_ids(len(ids))
+            self.index.add_with_ids(embeddings, faiss_ids)
+            self._write_docs(ids, texts, metadatas, embeddings, faiss_ids)
             self._save()
 
     def search(self, query_emb: np.ndarray, n_results: int = 10,
                where: Optional[dict] = None,
-               where_document: Optional[dict] = None) -> tuple[list[str], list[str], list[float], list[dict]]:
+               where_document: Optional[dict] = None
+               ) -> tuple[list[str], list[str], list[float], list[dict]]:
         query_emb = np.asarray(query_emb, dtype=np.float32).reshape(1, -1)
         faiss.normalize_L2(query_emb)
         if where_document:
@@ -98,9 +108,9 @@ class FaissStore:
             if k == 0:
                 return [], [], [], []
             distances, indices = self.index.search(query_emb, k)
-            idxs = indices[0].tolist()
+            faiss_ids = indices[0].tolist()
             dists = distances[0].tolist()
-            rows = self._get_rows(idxs)
+            rows = self._get_rows_by_faiss_id(faiss_ids)
         ids = [r[0] for r in rows]
         texts = [r[1] for r in rows]
         metadatas = [json.loads(r[2]) if r[2] else {} for r in rows]
@@ -125,7 +135,7 @@ class FaissStore:
                 placeholders = ",".join("?" * len(ids))
                 cur = self._db.execute(
                     f"SELECT id, text, metadata FROM docs WHERE id IN ({placeholders})",
-                    ids
+                    ids,
                 )
             else:
                 conditions = []
@@ -155,19 +165,22 @@ class FaissStore:
         return [r[0] for r in rows], [r[1] for r in rows], \
                [json.loads(r[2]) if r[2] else {} for r in rows]
 
-    def delete(self, ids: Optional[list[str]] = None, where: Optional[dict] = None) -> None:
+    def delete(self, ids: Optional[list[str]] = None,
+               where: Optional[dict] = None) -> None:
         with self._lock:
             if ids:
-                placeholders = ",".join("?" * len(ids))
-                self._db.execute(f"DELETE FROM pos_map WHERE doc_id IN ({placeholders})", ids)
-                self._db.execute(f"DELETE FROM docs WHERE id IN ({placeholders})", ids)
+                self._remove_by_doc_ids(ids)
             elif where:
                 cond, params = self._where_to_sql(where)
-                self._db.execute(f"DELETE FROM pos_map WHERE doc_id IN (SELECT id FROM docs WHERE {cond})", params)
-                self._db.execute(f"DELETE FROM docs WHERE {cond}", params)
+                del_ids = [
+                    r[0] for r in self._db.execute(
+                        f"SELECT id FROM docs WHERE {cond}", params,
+                    ).fetchall()
+                ]
+                if del_ids:
+                    self._remove_by_doc_ids(del_ids)
             else:
                 return
-            self._rebuild_index()
             self._save()
 
     def count(self) -> int:
@@ -179,78 +192,201 @@ class FaissStore:
             if hasattr(self, '_db'):
                 self._db.close()
 
+    def next_id(self) -> str:
+        with self._lock:
+            self._seq += 1
+            self._save_seq()
+            return f"doc_{self._seq}"
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
     def _init_db(self) -> None:
         self._db = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("""CREATE TABLE IF NOT EXISTS docs (
-                id TEXT PRIMARY KEY, text TEXT NOT NULL, metadata TEXT DEFAULT '{}',
-                vector BLOB, rowid INTEGER)""")
-        self._db.execute("""CREATE TABLE IF NOT EXISTS pos_map (
-                faiss_pos INTEGER PRIMARY KEY, doc_id TEXT NOT NULL)""")
-        self._db.execute("CREATE INDEX IF NOT EXISTS idx_pos_doc ON pos_map(doc_id)")
+                id TEXT PRIMARY KEY,
+                text TEXT NOT NULL,
+                metadata TEXT DEFAULT '{}',
+                vector BLOB,
+                faiss_id INTEGER
+        )""")
         self._db.commit()
 
-    def _write_docs(self, ids: list[str], texts: list[str],
-                    metadatas: list[dict], embeddings: np.ndarray, start_pos: int) -> None:
-        for i, (doc_id, text, meta) in enumerate(zip(ids, texts, metadatas)):
-            faiss_pos = start_pos + i
-            vec_blob = embeddings[i].tobytes()
-            self._db.execute(
-                "INSERT OR REPLACE INTO docs (id, text, metadata, vector, rowid) VALUES (?, ?, ?, ?, ?)",
-                (doc_id, text, json.dumps(meta), vec_blob, faiss_pos))
-            self._db.execute(
-                "INSERT OR REPLACE INTO pos_map (faiss_pos, doc_id) VALUES (?, ?)",
-                (faiss_pos, doc_id))
+    def _migrate_schema(self) -> None:
+        # v4.3.1: add faiss_id column if missing (upgrade from <=4.3.0)
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(docs)").fetchall()}
+        if "faiss_id" not in cols:
+            logger.info("Migrating schema: adding faiss_id column to docs")
+            self._db.execute("ALTER TABLE docs ADD COLUMN faiss_id INTEGER")
+            # Populate faiss_id from existing rowid values
+            rows = self._db.execute(
+                "SELECT id, rowid FROM docs WHERE faiss_id IS NULL",
+            ).fetchall()
+            for doc_id, rid in rows:
+                self._db.execute(
+                    "UPDATE docs SET faiss_id = ? WHERE id = ?", (int(rid), doc_id),
+                )
+            self._db.commit()
 
-    def _get_rows(self, faiss_indices: list[int]) -> list[tuple]:
-        if not faiss_indices:
+        # Drop legacy pos_map if present (replaced by faiss_id column)
+        legacy_tables = {
+            r[0] for r in self._db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'",
+            ).fetchall()
+        }
+        if "pos_map" in legacy_tables:
+            logger.info("Migrating schema: dropping legacy pos_map table")
+            self._db.execute("DROP TABLE IF EXISTS pos_map")
+            self._db.commit()
+
+    def _alloc_faiss_ids(self, count: int) -> np.ndarray:
+        """Allocate ``count`` unique int64 FAISS IDs from the sequence counter."""
+        start = self._seq + 1
+        self._seq += count
+        self._save_seq()
+        return np.arange(start, start + count, dtype=np.int64)
+
+    def _write_docs(self, ids: list[str], texts: list[str],
+                    metadatas: list[dict], embeddings: np.ndarray,
+                    faiss_ids: np.ndarray) -> None:
+        for doc_id, text, meta, emb, fid in zip(ids, texts, metadatas,
+                                                 embeddings, faiss_ids):
+            vec_blob = emb.tobytes()
+            self._db.execute(
+                "INSERT OR REPLACE INTO docs "
+                "(id, text, metadata, vector, faiss_id) VALUES (?, ?, ?, ?, ?)",
+                (doc_id, text, json.dumps(meta), vec_blob, int(fid)),
+            )
+
+    def _get_rows_by_faiss_id(self, faiss_ids: list[int]) -> list[tuple]:
+        """Look up docs by their FAISS ID, preserving search-result order."""
+        valid = [fid for fid in faiss_ids if fid != -1]
+        if not valid:
             return []
-        placeholders = ",".join("?" * len(faiss_indices))
-        order_clause = " ".join(f"WHEN {int(pos)} THEN {int(i)}" for i, pos in enumerate(faiss_indices))
+        placeholders = ",".join("?" * len(valid))
+        order_clause = " ".join(
+            f"WHEN {int(fid)} THEN {int(i)}" for i, fid in enumerate(valid)
+        )
         cur = self._db.execute(
-            f"SELECT d.id, d.text, d.metadata FROM docs d "
-            f"JOIN pos_map p ON d.id = p.doc_id "
-            f"WHERE p.faiss_pos IN ({placeholders}) "
-            f"ORDER BY CASE p.faiss_pos {order_clause} END",
-            faiss_indices)
+            f"SELECT id, text, metadata FROM docs "
+            f"WHERE faiss_id IN ({placeholders}) "
+            f"ORDER BY CASE faiss_id {order_clause} END",
+            valid,
+        )
         return cur.fetchall()
 
     def _get_existing_ids(self, ids: list[str]) -> list[str]:
         if not ids:
             return []
         placeholders = ",".join("?" * len(ids))
-        cur = self._db.execute(f"SELECT id FROM docs WHERE id IN ({placeholders})", ids)
+        cur = self._db.execute(
+            f"SELECT id FROM docs WHERE id IN ({placeholders})", ids,
+        )
         return [r[0] for r in cur.fetchall()]
 
-    def _rebuild_index(self) -> None:
+    def _get_faiss_ids_for_docs(self, doc_ids: list[str]) -> list[int]:
+        """Return stable faiss_id values for the given doc IDs."""
+        if not doc_ids:
+            return []
+        placeholders = ",".join("?" * len(doc_ids))
         cur = self._db.execute(
-            "SELECT id, vector, rowid FROM docs WHERE vector IS NOT NULL ORDER BY rowid")
+            f"SELECT faiss_id FROM docs WHERE id IN ({placeholders}) "
+            f"AND faiss_id IS NOT NULL",
+            doc_ids,
+        )
+        return [r[0] for r in cur.fetchall()]
+
+    def _remove_by_doc_ids(self, doc_ids: list[str]) -> None:
+        """Remove docs from FAISS + SQLite. No full-rebuild needed."""
+        faiss_ids = self._get_faiss_ids_for_docs(doc_ids)
+        if faiss_ids:
+            selector = faiss.IDSelectorArray(np.array(faiss_ids, dtype=np.int64))
+            self.index.remove_ids(selector)
+        placeholders = ",".join("?" * len(doc_ids))
+        self._db.execute(f"DELETE FROM docs WHERE id IN ({placeholders})", doc_ids)
+
+    def _rebuild_index(self) -> None:
+        """Full rebuild from SQLite vectors (crash recovery)."""
+        cur = self._db.execute(
+            "SELECT id, vector, faiss_id FROM docs "
+            "WHERE vector IS NOT NULL AND faiss_id IS NOT NULL "
+            "ORDER BY faiss_id",
+        )
         rows = cur.fetchall()
-        self.index = faiss.IndexFlatIP(self.dimension)
-        self._db.execute("DELETE FROM pos_map")
+        self.index = faiss.IndexIDMap(faiss.IndexFlatIP(self.dimension))
         if not rows:
             logger.info("FAISS index rebuilt (empty)")
             return
         vectors = []
-        doc_ids = []
-        for doc_id, vec_blob, _ in rows:
+        faiss_ids = []
+        for doc_id, vec_blob, fid in rows:
             vec = np.frombuffer(vec_blob, dtype=np.float32)
             if len(vec) != self.dimension:
                 logger.warning("Skipping doc %s: wrong vector dim %d", doc_id, len(vec))
                 continue
             vectors.append(vec)
-            doc_ids.append(doc_id)
+            faiss_ids.append(int(fid))
         if not vectors:
             logger.info("FAISS index rebuilt (all vectors skipped)")
             return
         all_vecs = np.array(vectors, dtype=np.float32)
         faiss.normalize_L2(all_vecs)
-        self.index.add(all_vecs)
-        for i, doc_id in enumerate(doc_ids):
-            self._db.execute(
-                "INSERT OR REPLACE INTO pos_map (faiss_pos, doc_id) VALUES (?, ?)", (i, doc_id))
-            self._db.execute("UPDATE docs SET rowid = ? WHERE id = ?", (i, doc_id))
-        logger.info("FAISS index rebuilt with %d vectors", len(doc_ids))
+        self.index.add_with_ids(
+            all_vecs, np.array(faiss_ids, dtype=np.int64),
+        )
+        logger.info("FAISS index rebuilt with %d vectors", len(vectors))
+
+    def _save(self) -> None:
+        try:
+            self._db.commit()
+            faiss.write_index(self.index, str(self.path / "index.faiss"))
+        except Exception:
+            logger.exception("FAISS index write failed")
+            raise
+
+    # ------------------------------------------------------------------
+    # seq counter
+    # ------------------------------------------------------------------
+
+    def _load_seq(self) -> int:
+        if self._seq_path.exists():
+            try:
+                return int(self._seq_path.read_text().strip())
+            except (ValueError, OSError):
+                pass
+        try:
+            cur = self._db.execute(
+                "SELECT COALESCE(MAX(faiss_id), 0) FROM docs",
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                return int(row[0])
+        except sqlite3.OperationalError:
+            pass
+        try:
+            cur = self._db.execute(
+                "SELECT id FROM docs WHERE id GLOB 'doc_*' "
+                "ORDER BY CAST(SUBSTR(id, 5) AS INTEGER) DESC LIMIT 1",
+            )
+            row = cur.fetchone()
+            if row:
+                parts = row[0].split('_')
+                if len(parts) >= 2 and parts[-1].isdigit():
+                    return int(parts[-1])
+        except sqlite3.OperationalError:
+            pass
+        return 0
+
+    def _save_seq(self) -> None:
+        tmp = self.path / "seq.tmp"
+        tmp.write_text(str(self._seq))
+        tmp.replace(self._seq_path)
+
+    # ------------------------------------------------------------------
+    # Filter helpers (unchanged from v4.3.0)
+    # ------------------------------------------------------------------
 
     def _matches_where(self, metadata: dict, where: dict) -> bool:
         for key, condition in where.items():
@@ -319,36 +455,46 @@ class FaissStore:
                     raise ValueError(f"Invalid metadata key: {key!r}")
                 if isinstance(condition, dict):
                     for op, op_val in condition.items():
-                        if op in ("$eq", "$ne", "$in", "$nin", "$gt", "$gte", "$lt", "$lte"):
+                        if op in ("$eq", "$ne", "$in", "$nin",
+                                  "$gt", "$gte", "$lt", "$lte"):
                             json_path = f"$.{key}"
                             if op == "$eq":
-                                conditions.append(f"json_extract({meta_col}, ?) = ?")
+                                conditions.append(
+                                    f"json_extract({meta_col}, ?) = ?")
                                 params.extend([json_path, _sql_val(op_val)])
                             elif op == "$ne":
-                                conditions.append(f"json_extract({meta_col}, ?) != ?")
+                                conditions.append(
+                                    f"json_extract({meta_col}, ?) != ?")
                                 params.extend([json_path, _sql_val(op_val)])
                             elif op == "$in":
                                 ph = ",".join("?" * len(op_val))
-                                conditions.append(f"json_extract({meta_col}, ?) IN ({ph})")
+                                conditions.append(
+                                    f"json_extract({meta_col}, ?) IN ({ph})")
                                 params.extend([json_path] + list(op_val))
                             elif op == "$nin":
                                 ph = ",".join("?" * len(op_val))
-                                conditions.append(f"json_extract({meta_col}, ?) NOT IN ({ph})")
+                                conditions.append(
+                                    f"json_extract({meta_col}, ?) NOT IN ({ph})")
                                 params.extend([json_path] + list(op_val))
                             elif op == "$gt":
-                                conditions.append(f"json_extract({meta_col}, ?) > ?")
+                                conditions.append(
+                                    f"json_extract({meta_col}, ?) > ?")
                                 params.extend([json_path, op_val])
                             elif op == "$gte":
-                                conditions.append(f"json_extract({meta_col}, ?) >= ?")
+                                conditions.append(
+                                    f"json_extract({meta_col}, ?) >= ?")
                                 params.extend([json_path, op_val])
                             elif op == "$lt":
-                                conditions.append(f"json_extract({meta_col}, ?) < ?")
+                                conditions.append(
+                                    f"json_extract({meta_col}, ?) < ?")
                                 params.extend([json_path, op_val])
                             elif op == "$lte":
-                                conditions.append(f"json_extract({meta_col}, ?) <= ?")
+                                conditions.append(
+                                    f"json_extract({meta_col}, ?) <= ?")
                                 params.extend([json_path, op_val])
                 else:
-                    conditions.append(f"json_extract({meta_col}, ?) = ?")
+                    conditions.append(
+                        f"json_extract({meta_col}, ?) = ?")
                     params.extend([f"$.{key}", _sql_val(condition)])
         return " AND ".join(conditions) if conditions else "1=1", params
 
@@ -360,43 +506,3 @@ class FaissStore:
                 conditions.append("text LIKE ?")
                 params.append(f"%{condition}%")
         return " AND ".join(conditions) if conditions else "1=1", params
-
-    def _save(self) -> None:
-        # Commit SQLite first, then write FAISS. If FAISS write fails, data
-        # is in SQLite and will be recovered on next rebuild.
-        try:
-            self._db.commit()
-            faiss.write_index(self.index, str(self.path / "index.faiss"))
-        except Exception:
-            logger.exception("FAISS index write failed")
-            raise
-
-    def _load_seq(self) -> int:
-        if self._seq_path.exists():
-            try:
-                return int(self._seq_path.read_text().strip())
-            except (ValueError, OSError):
-                pass
-        try:
-            cur = self._db.execute(
-                "SELECT id FROM docs WHERE id GLOB 'doc_*' ORDER BY CAST(SUBSTR(id, 5) AS INTEGER) DESC LIMIT 1"
-            )
-            row = cur.fetchone()
-            if row:
-                parts = row[0].split('_')
-                if len(parts) >= 2 and parts[-1].isdigit():
-                    return int(parts[-1])
-        except sqlite3.OperationalError:
-            pass
-        return 0
-
-    def _save_seq(self) -> None:
-        tmp = self.path / "seq.tmp"
-        tmp.write_text(str(self._seq))
-        tmp.replace(self._seq_path)
-
-    def next_id(self) -> str:
-        with self._lock:
-            self._seq += 1
-            self._save_seq()
-            return f"doc_{self._seq}"

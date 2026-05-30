@@ -10,9 +10,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Optional
-
 
 _AI_UNAMBIGUOUS_TERMS = [
     "Anthropic",

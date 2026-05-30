@@ -19,15 +19,21 @@ from pathlib import Path
 from typing import Optional, Union
 
 from alt_memory.config import AltMemoryConfig
-from alt_memory.miner import (
-    _chunk_text, _cleanup_mine_pid_file,
-    _compute_topic_tunnels_for_wing,
-    _extract_content_date, _extract_entities_for_metadata,
-)
 from alt_memory.dimension import (
-    Dimension, file_already_mined, get_nodes_collection, mine_lock,
+    DEFAULT_MAX_FILE_SIZE,
+    ENTITY_UPSERT_BATCH_SIZE,
     SKIP_DIRS,
-    ENTITY_UPSERT_BATCH_SIZE, DEFAULT_MAX_FILE_SIZE,
+    Dimension,
+    file_already_mined,
+    get_nodes_collection,
+    mine_lock,
+)
+from alt_memory.miner import (
+    _chunk_text,
+    _cleanup_mine_pid_file,
+    _compute_topic_tunnels_for_wing,
+    _extract_content_date,
+    _extract_entities_for_metadata,
 )
 
 logger = logging.getLogger(__name__)

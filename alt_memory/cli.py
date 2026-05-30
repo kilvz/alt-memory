@@ -283,7 +283,7 @@ def main():
                 print("No realms.")
             else:
                 for r in realms:
-                    desc = f" - {r['description']}" if r['description'] and args.verbose else ""
+                    desc = f" - {r['description']}" if r["description"] and args.verbose else ""
                     print(f"  {r['name']:20s}  {r['entity_count']} entities{desc}")
 
         elif args.command == "rooms":
@@ -314,7 +314,7 @@ def main():
                 print("No facts found.")
             else:
                 for f in facts:
-                    valid = f" [{f['valid_from']} -> {f['valid_to'] or 'now'}]" if f['valid_from'] else ""
+                    valid = f" [{f['valid_from']} -> {f['valid_to'] or 'now'}]" if f["valid_from"] else ""
                     print(f"  {f['subject']} -- {f['predicate']} -- {f['object']}{valid}")
 
         elif args.command == "kg-invalidate":
@@ -358,7 +358,7 @@ def main():
 
         elif args.command == "aaak":
             from alt_memory.dialect import aaak_compress, aaak_parse_entry
-            text = args.text if args.text else sys.stdin.read().strip()
+            text = args.text or sys.stdin.read().strip()
             if args.output_format == "json":
                 parsed = aaak_parse_entry(text)
                 print(json.dumps(parsed, indent=2))
@@ -464,7 +464,8 @@ def main():
             run_instructions(args.instr_command)
 
         elif args.command == "migrate":
-            from alt_memory.migrate import migrate, rebuild_faiss, status as migrate_status
+            from alt_memory.migrate import migrate, rebuild_faiss
+            from alt_memory.migrate import status as migrate_status
             base = str(Path(args.dimension).expanduser().resolve())
 
             if args.status:
@@ -488,12 +489,14 @@ def main():
                     print(f"Pending migrations: {result['migrations_applied'] or 'none'}")
                 else:
                     print(f"Version: {result['version_before']} -> {result['version_after']}")
-                    for m in result['migrations_applied']:
+                    for m in result["migrations_applied"]:
                         print(f"  Applied: {m}")
 
         elif args.command == "repair":
             from alt_memory.repair_utils import (
-                confirm_destructive_action, rebuild_fts5, run_vacuum,
+                confirm_destructive_action,
+                rebuild_fts5,
+                run_vacuum,
                 sqlite_integrity_errors,
             )
             db_path = str(Path(args.dimension).expanduser() / "dimension.db")
@@ -540,7 +543,10 @@ def main():
                         print("No repair needed — dimension is healthy.")
 
         elif args.command == "repair-status":
-            from alt_memory.repair_utils import sqlite_entity_count, sqlite_integrity_errors
+            from alt_memory.repair_utils import (
+                sqlite_entity_count,
+                sqlite_integrity_errors,
+            )
             db_path = str(Path(args.dimension).expanduser() / "dimension.db")
             count = sqlite_entity_count(db_path)
             errors = sqlite_integrity_errors(db_path)

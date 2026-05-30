@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import functools
 import json
+import logging
 import os
 import re
-import logging
 from collections import defaultdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from alt_memory.entity_registry import EntityRegistry
 
+from alt_memory.dimension import _ENTITY_STOPLIST, SKIP_DIRS
 from alt_memory.i18n import get_entity_patterns
-from alt_memory.dimension import SKIP_DIRS, _ENTITY_STOPLIST
 
 logger = logging.getLogger(__name__)
 
@@ -136,24 +136,22 @@ _KNOWN_TECHNOLOGIES: set[str] = {
     "Llama", "Stable Diffusion", "Midjourney", "DALL-E",
     # Companies
     "Microsoft", "Google", "Apple", "Amazon", "Meta", "Netflix",
-    "Tesla", "SpaceX", "Oracle", "IBM", "Intel", "AMD", "NVIDIA",
+    "Tesla", "SpaceX", "IBM", "Intel", "AMD", "NVIDIA",
     "Samsung", "Sony", "Adobe", "Salesforce", "SAP", "VMware",
-    "Red Hat", "Canonical", "HashiCorp", "Datadog", "Snowflake",
-    "Palantir", "CrowdStrike", "Cloudflare", "GitLab", "GitHub",
+    "Red Hat", "Canonical", "HashiCorp", "Palantir", "CrowdStrike", "Cloudflare", "GitLab", "GitHub",
     "Atlassian", "Slack", "Shopify", "Uber", "Airbnb", "Twitter/X",
     "LinkedIn", "Pinterest", "Spotify", "Stripe", "Square",
-    "Twilio", "SendGrid", "MongoDB", "Elastic", "Confluent",
-    "Databricks", "Hugging Face", "Anthropic", "OpenAI",
-    "YOLO", "MediaPipe", "Tesseract", "EasyOCR",
+    "Twilio", "SendGrid", "Elastic", "Confluent",
+    "Databricks", "YOLO", "MediaPipe", "Tesseract", "EasyOCR",
     "XGBoost", "LightGBM", "CatBoost", "Random Forest",
     # Cloud providers & services
-    "AWS", "GCP", "Azure", "Cloudflare", "Vercel", "Netlify",
+    "AWS", "GCP", "Azure", "Vercel", "Netlify",
     "Heroku", "DigitalOcean", "Linode", "Fly.io", "Railway",
     "Render", "Lambda", "Lambda Functions", "S3", "EC2",
     "CloudFront", "Route 53", "API Gateway", "CloudRun",
-    "Firebase", "App Engine", "Cloud Functions",
+    "App Engine", "Cloud Functions",
     # Tools
-    "Git", "GitHub", "GitLab", "Bitbucket", "Gitea", "Codeberg",
+    "Git", "Bitbucket", "Gitea", "Codeberg",
     "Mercurial", "SVN", "CVS",
     "VS Code", "Vim", "Neovim", "Emacs", "IntelliJ", "PyCharm",
     "WebStorm", "GoLand", "CLion", "Rider", "RubyMine",
@@ -166,7 +164,7 @@ _KNOWN_TECHNOLOGIES: set[str] = {
     "FFmpeg", "ImageMagick", "Blender", "Unity", "Unreal",
     "Make", "CMake", "Bazel", "Ninja", "Gradle", "Maven",
     "Ant", "SBT", "Leiningen",
-    "Yarn", "npm", "pnpm", "Bun", "Cargo", "pip", "conda",
+    "Yarn", "npm", "pnpm", "Cargo", "pip", "conda",
     "Poetry", "Pipenv", "PDM", "Rye", "uv",
     "Homebrew", "Chocolatey", "Scoop", "apt", "yum", "pacman",
     "jq", "yq", "curl", "wget", "ripgrep", "fd", "fzf",
@@ -213,7 +211,7 @@ _KNOWN_FIRST_NAMES: set[str] = {
     "Liam", "Noah", "Oliver", "Elijah", "Lucas", "Mason", "Logan",
     "Aiden", "Carter", "Jameson", "Asher", "Silas", "Ezra", "Owen",
     "Luca", "Amelia", "Olivia", "Charlotte", "Sophia", "Isabella",
-    "Mia", "Evelyn", "Harper", "Luna", "Chloe", "Penelope", "Layla",
+    "Mia", "Harper", "Luna", "Chloe", "Penelope", "Layla",
     "Riley", "Zoey", "Nora", "Lily", "Aria", "Aurora", "Stella",
     "Mila", "Hannah", "Avery", "Levi", "Gabriel", "Isaac",
     "Muhammad", "Julian", "Mateo", "Sebastian", "Adrian",
@@ -263,9 +261,8 @@ _KNOWN_SURNAMES: set[str] = {
     "Wagner", "Becker", "Hoffmann", "Schäfer", "Koch",
     "Rossi", "Russo", "Ferrari", "Esposito", "Bianchi",
     "Romano", "Gallo", "Costa", "Fontana", "Conti",
-    "MacDonald", "MacKenzie", "Campbell", "Stewart", "Murray",
-    "Armstrong", "Crawford", "Douglas", "Ferguson", "Gibson",
-    "O'Brien", "O'Sullivan", "O'Connor", "O'Neill", "Ryan",
+    "MacDonald", "MacKenzie", "Murray",
+    "Armstrong", "Crawford", "Douglas", "Ferguson", "O'Brien", "O'Sullivan", "O'Connor", "O'Neill", "Ryan",
     "Walsh", "Byrne", "Lynch", "Doyle", "McCarthy",
     "Khalil", "Haddad", "Said", "Abboud", "Nassar",
     "Yamamoto", "Sato", "Tanaka", "Watanabe", "Nakamura",
@@ -301,7 +298,7 @@ _KNOWN_LOCATIONS: set[str] = {
     "Lahore", "Karachi", "Islamabad", "Faisalabad",
     "Dhaka", "Chittagong", "Casablanca", "Marrakesh", "Rabat",
     "Cape Town", "Johannesburg", "Durban", "Pretoria",
-    "Addis Ababa", "Nairobi", "Accra", "Kumasi",
+    "Addis Ababa", "Accra", "Kumasi",
     # Countries
     "United States", "USA", "United States of America",
     "Canada", "Mexico", "Brazil", "Argentina", "Chile", "Colombia",
@@ -320,7 +317,7 @@ _KNOWN_LOCATIONS: set[str] = {
     "India", "Pakistan", "Bangladesh", "Sri Lanka", "Nepal",
     "Bhutan", "Myanmar", "Laos", "Cambodia", "Vietnam",
     "Thailand", "Malaysia", "Indonesia", "Philippines",
-    "Singapore", "Brunei", "East Timor",
+    "Brunei", "East Timor",
     "Australia", "New Zealand", "Papua New Guinea", "Fiji",
     "Saudi Arabia", "UAE", "United Arab Emirates", "Qatar",
     "Kuwait", "Oman", "Bahrain", "Jordan", "Lebanon",
@@ -340,7 +337,7 @@ _KNOWN_LOCATIONS: set[str] = {
     "California", "Texas", "Florida", "New York State",
     "Nevada", "Oregon", "Washington State", "Colorado",
     "Arizona", "Illinois", "Massachusetts", "Pennsylvania",
-    "Georgia", "North Carolina", "Michigan", "Ohio",
+    "North Carolina", "Michigan", "Ohio",
     "Virginia", "Washington DC", "Hawaii", "Alaska",
     "Bavaria", "Catalonia", "Quebec", "Ontario",
     "British Columbia", "Tuscany", "Provence", "Burgundy",
@@ -1059,7 +1056,7 @@ def classify_entity(name: str, frequency: int, scores: dict) -> dict:
             break
     strong_pronoun_signal = pronoun_hits >= 5 and frequency > 0 and pronoun_hits / frequency >= 0.2
 
-    if person_ratio >= 0.7 and (has_two_signal_types and ps >= 5 or strong_pronoun_signal):
+    if person_ratio >= 0.7 and ((has_two_signal_types and ps >= 5) or strong_pronoun_signal):
         entity_type = "person"
         confidence = min(0.99, 0.5 + person_ratio * 0.5)
         signals = scores["person_signals"] or [f"appears {frequency}x"]

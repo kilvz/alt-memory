@@ -1,11 +1,9 @@
 """Tests for all embedder variants with both backends."""
 
-import os
 import shutil
 import tempfile
 
 import pytest
-
 
 BACKENDS = ["faiss", "chroma"]
 EMBEDDERS = ["numpy", "minilm", "bert"]

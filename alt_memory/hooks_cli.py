@@ -446,8 +446,7 @@ def _save_record_direct(transcript_path: str, session_id: str, realm: str = "", 
             if toast:
                 _desktop_toast(f"Checkpoint saved — {len(messages)} messages archived")
             return {"count": len(messages), "themes": themes}
-        else:
-            _log(f"Record checkpoint failed: {result.get('error', 'unknown')}")
+        _log(f"Record checkpoint failed: {result.get('error', 'unknown')}")
     except Exception as e:
         _log(f"Record checkpoint error: {e}")
     return {"count": 0}

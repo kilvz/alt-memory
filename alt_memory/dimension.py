@@ -869,10 +869,9 @@ class Dimension:
 
         if mode == "keyword":
             return self._keyword_search(query, n_results, realm, domain)
-        elif mode == "vector":
+        if mode == "vector":
             return self._vector_search(query, n_results, realm, domain)
-        else:
-            return self._hybrid_search(query, n_results, realm, domain)
+        return self._hybrid_search(query, n_results, realm, domain)
 
     def search_memories(
         self,
@@ -898,7 +897,10 @@ class Dimension:
             candidate_strategy: ``"vector"`` (default) or ``"union"`` (vector + BM25).
             vector_disabled: When True, route to keyword-only search.
         """
-        from alt_memory.searcher import validate_candidate_strategy, apply_candidate_strategy
+        from alt_memory.searcher import (
+            apply_candidate_strategy,
+            validate_candidate_strategy,
+        )
 
         validate_candidate_strategy(candidate_strategy)
 
@@ -1659,7 +1661,7 @@ def build_node_lines(
         if e in seen_entities:
             continue
         seen_entities.add(e)
-        match = re.search(r'\b' + re.escape(e) + r'\b', text, re.IGNORECASE)
+        match = re.search(r"\b" + re.escape(e) + r"\b", text, re.IGNORECASE)
         pos = match.start() if match else text.lower().find(e.lower())
         window_start = max(0, pos - NODE_EXTRACT_WINDOW)
         window_end = min(len(text), window_start + 2 * NODE_EXTRACT_WINDOW + len(e))

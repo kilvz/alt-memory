@@ -416,7 +416,7 @@ def _try_chatgpt_json(data) -> Optional[str]:
             if node.get("message") is None:
                 root_id = node_id
                 break
-            elif fallback_root is None:
+            if fallback_root is None:
                 fallback_root = node_id
     if not root_id:
         root_id = fallback_root

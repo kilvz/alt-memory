@@ -27,8 +27,7 @@ from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 
 from alt_memory.config import AltMemoryConfig, normalize_realm_name
-from alt_memory.dimension import mine_lock
-from alt_memory.dimension import Dimension
+from alt_memory.dimension import Dimension, mine_lock
 
 logger = logging.getLogger("alt_memory_dim_graph")
 

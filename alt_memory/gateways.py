@@ -31,15 +31,15 @@ import json
 import logging
 import os
 import tempfile
+import threading
 from collections import defaultdict
 from datetime import datetime, timezone
 from itertools import combinations
 from typing import Optional
-import threading
 
 from alt_memory.config import AltMemoryConfig
-from alt_memory.dynamics import initialize_dynamics_fields
 from alt_memory.dimension import Dimension
+from alt_memory.dynamics import initialize_dynamics_fields
 
 logger = logging.getLogger("alt_memory_gateways")
 
@@ -61,8 +61,8 @@ _gateway_lock = threading.Lock()
 
 __all__ = [
     "compute_gateways_for_realm",
-    "list_gateways",
     "delete_gateway",
+    "list_gateways",
 ]
 
 

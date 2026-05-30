@@ -9,16 +9,16 @@ import logging
 import os
 import re
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
-import urllib.error
 from datetime import datetime
 from typing import Optional
 
 from alt_memory.dimension import (
     NORMALIZE_VERSION,
-    get_nodes_collection,
     get_collection,
+    get_nodes_collection,
     mine_lock,
     purge_file_nodes,
     upsert_node_lines,

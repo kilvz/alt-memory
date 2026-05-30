@@ -18,19 +18,19 @@ from pathlib import Path
 from typing import Any, Optional
 
 try:
-    from http.server import HTTPServer, BaseHTTPRequestHandler
+    from http.server import BaseHTTPRequestHandler, HTTPServer
     from urllib.parse import urlparse
 
     HAS_HTTP = True
 except ImportError:
     HAS_HTTP = False
 
-from alt_memory.dialect import aaak_compress, aaak_decompress, aaak_parse_entry
-from alt_memory.entity_registry import EntityRegistry
 from alt_memory import dim_graph
-from alt_memory.sync import sync_dimension
 from alt_memory.config import AltMemoryConfig
+from alt_memory.dialect import aaak_compress, aaak_decompress, aaak_parse_entry
 from alt_memory.dimension import Dimension
+from alt_memory.entity_registry import EntityRegistry
+from alt_memory.sync import sync_dimension
 
 try:
     from alt_memory.layers import MemoryStack
@@ -737,7 +737,7 @@ def _build_tool_definitions() -> list[dict]:
                 "properties": {
                     "map": {
                         "type": "object",
-                        "description": "Mapping of name variants to canonical names, e.g. {\"Alex\": \"Alexander\"}",
+                        "description": 'Mapping of name variants to canonical names, e.g. {"Alex": "Alexander"}',
                     },
                 },
                 "required": ["map"],

@@ -13,14 +13,14 @@ from typing import Any, Optional
 import pathspec
 
 from alt_memory.dialect import aaak_compress
-from alt_memory.entity_registry import EntityRegistry
 from alt_memory.dimension import (
-    Dimension,
+    _ENTITY_STOPLIST,
     SKIP_DIRS,
+    Dimension,
     MineAlreadyRunning,
     mine_dimension_lock,
-    _ENTITY_STOPLIST,
 )
+from alt_memory.entity_registry import EntityRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -1078,8 +1078,8 @@ def batch_mine(
             if tunnels:
                 logger.info("Post-mine: created %d topic tunnel(s) for realm %s", tunnels, realm)
 
-            from alt_memory.gateways import compute_gateways_for_realm
             from alt_memory.dim_graph import entity_tunnels_for_realm
+            from alt_memory.gateways import compute_gateways_for_realm
 
             gws = compute_gateways_for_realm(realm, dim_path=str(dim._base))
             if gws:

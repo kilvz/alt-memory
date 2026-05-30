@@ -202,7 +202,7 @@ class FaissStore:
                     self._faiss_dirty = False
                 except Exception:
                     logger.exception("FAISS index write failed on close")
-            if hasattr(self, '_db'):
+            if hasattr(self, "_db"):
                 self._db.close()
 
     def next_id(self) -> str:
@@ -395,7 +395,7 @@ class FaissStore:
             )
             row = cur.fetchone()
             if row:
-                parts = row[0].split('_')
+                parts = row[0].split("_")
                 if len(parts) >= 2 and parts[-1].isdigit():
                     return int(parts[-1])
         except sqlite3.OperationalError:
@@ -425,13 +425,13 @@ class FaissStore:
                     for op, op_val in condition.items():
                         if op == "$eq" and val != op_val:
                             return False
-                        elif op == "$ne" and val == op_val:
+                        if op == "$ne" and val == op_val:
                             return False
-                        elif op == "$in" and val not in op_val:
+                        if op == "$in" and val not in op_val:
                             return False
-                        elif op == "$nin" and val in op_val:
+                        if op == "$nin" and val in op_val:
                             return False
-                        elif op in ("$gt", "$gte", "$lt", "$lte"):
+                        if op in ("$gt", "$gte", "$lt", "$lte"):
                             if val is None:
                                 return False
                             try:
@@ -474,7 +474,7 @@ class FaissStore:
                     sub_conds.append("1=1")
                 conditions.append("(" + " OR ".join(sub_conds) + ")")
             else:
-                if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_.]*$', key):
+                if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_.]*$", key):
                     raise ValueError(f"Invalid metadata key: {key!r}")
                 if isinstance(condition, dict):
                     for op, op_val in condition.items():

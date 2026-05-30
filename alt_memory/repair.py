@@ -254,8 +254,7 @@ def scan_dimension(dim_path: Optional[str] = None) -> tuple[set[str], set[str]]:
     if bad:
         bad_file = base / "corrupt_ids.txt"
         with open(str(bad_file), "w") as f:
-            for bid in sorted(bad):
-                f.write(bid + "\n")
+            f.writelines(bid + "\n" for bid in sorted(bad))
         print(f"  Bad IDs written to: {bad_file}")
 
     return good, bad

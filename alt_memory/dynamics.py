@@ -109,14 +109,14 @@ def _parse_iso(value) -> Optional[datetime]:
 
 
 __all__ = [
-    "STRENGTH_FLOOR",
-    "MAX_STRENGTH",
     "DEFAULT_STABILITY",
     "DEFAULT_STRENGTH",
+    "MAX_STRENGTH",
     "POTENTIATION_INCREMENT",
     "SPACED_INTERVAL_HOURS",
     "STABILITY_INCREMENT",
+    "STRENGTH_FLOOR",
+    "apply_decay",
     "initialize_dynamics_fields",
     "potentiate",
-    "apply_decay",
 ]

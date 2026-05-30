@@ -1,6 +1,5 @@
 """Tests for KnowledgeGraph."""
 
-import pytest
 
 
 class TestKGAdd:

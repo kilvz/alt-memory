@@ -233,7 +233,7 @@ class AltMemoryConfig:
             )
         if min_chunk_size > chunk_size:
             min_chunk_size = (
-                DEFAULT_MIN_CHUNK_SIZE if DEFAULT_MIN_CHUNK_SIZE <= chunk_size else chunk_size
+                min(DEFAULT_MIN_CHUNK_SIZE, chunk_size)
             )
         return chunk_size, chunk_overlap, min_chunk_size
 

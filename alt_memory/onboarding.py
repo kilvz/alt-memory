@@ -13,9 +13,9 @@ from minute one — before a single session is indexed.
 import logging
 from pathlib import Path
 
-from alt_memory.entity_detector import EntityDetector
 from alt_memory.backends.knowledge_graph import KnowledgeGraph
 from alt_memory.dimension import SKIP_DIRS
+from alt_memory.entity_detector import EntityDetector
 
 logger = logging.getLogger(__name__)
 
@@ -38,22 +38,20 @@ COMMON_ENGLISH_WORDS = {
     "well", "way", "even", "new", "want", "because", "any", "these", "give",
     "day", "most", "us", "great", "many", "need", "too", "very", "every",
     "thing", "find", "right", "still", "between", "own", "never", "must",
-    "say", "much", "ask", "long", "off", "here", "why", "under", "same",
+    "much", "ask", "long", "off", "here", "why", "under", "same",
     "next", "really", "should", "last", "let", "keep", "hand", "place",
     "while", "high", "world", "each", "tell", "set", "three", "run",
     "open", "together", "always", "move", "point", "old", "small",
     "around", "put", "however", "yet", "begin", "better", "best",
-    "real", "enough", "though", "until", "always", "away", "face",
+    "real", "enough", "though", "until", "away", "face",
     "seem", "big", "another", "close", "end", "far", "few", "group",
     "help", "large", "later", "leave", "life", "light", "line",
-    "live", "man", "mean", "might", "more", "most", "name", "never",
-    "next", "night", "number", "often", "once", "order", "part",
+    "live", "man", "mean", "might", "more", "name", "night", "number", "often", "once", "order", "part",
     "possible", "present", "problem", "public", "quite", "rather",
-    "reason", "result", "right", "room", "show", "side", "since",
-    "state", "still", "such", "sure", "take", "thing", "think",
-    "though", "thus", "today", "together", "top", "true", "turn",
-    "used", "value", "various", "view", "voice", "way", "week",
-    "whether", "whole", "without", "woman", "word", "work", "year",
+    "reason", "result", "room", "show", "side", "since",
+    "state", "such", "sure", "thus", "today", "top", "true", "turn",
+    "used", "value", "various", "view", "voice", "week",
+    "whether", "whole", "without", "woman", "word",
 }
 
 
@@ -70,7 +68,7 @@ def _header(text):
 def _ask(prompt, default=None):
     if default:
         val = input(f"  {prompt} [{default}]: ").strip()
-        return val if val else default
+        return val or default
     return input(f"  {prompt}: ").strip()
 
 
@@ -97,9 +95,9 @@ def _ask_mode() -> str:
         choice = input("  Your choice [1/2/3]: ").strip()
         if choice == "1":
             return "work"
-        elif choice == "2":
+        if choice == "2":
             return "personal"
-        elif choice == "3":
+        if choice == "3":
             return "combo"
         print("  Please enter 1, 2, or 3.")
 

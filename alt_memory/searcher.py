@@ -35,7 +35,7 @@ def _bm25_scores(
         return [0.0] * n_docs
     avgdl = sum(doc_lens) / n_docs or 1.0
 
-    df = {term: 0 for term in query_terms}
+    df = dict.fromkeys(query_terms, 0)
     for toks in tokenized:
         seen = set(toks) & query_terms
         for term in seen:

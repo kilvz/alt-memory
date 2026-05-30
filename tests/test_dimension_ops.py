@@ -1,6 +1,5 @@
 """Tests for Dimension CRUD, batch operations, and search."""
 
-import pytest
 
 
 class TestRealmDomain:

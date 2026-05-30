@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from alt_memory.miner import _extract_entities_for_metadata
 from alt_memory.dimension import (
     Dimension,
     build_node_lines,
@@ -18,6 +17,7 @@ from alt_memory.dimension import (
     purge_file_nodes,
     upsert_node_lines,
 )
+from alt_memory.miner import _extract_entities_for_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ def ingest_records(
         if not force:
             if prev_hash is not None and curr_hash == prev_hash:
                 continue
-            elif curr_size == prev_entry.get("size", 0) and prev_entry.get("size", 0) > 0:
+            if curr_size == prev_entry.get("size", 0) and prev_entry.get("size", 0) > 0:
                 state[state_key] = {**prev_entry, "content_hash": curr_hash}
                 continue
 
@@ -153,17 +153,17 @@ def ingest_records(
                 batch: list[tuple[str, str, str, dict, str, Optional[str]]] = []
                 entry_chunks: list[tuple[str, list[str]]] = []
                 for entry in new_entries:
-                    entry_text = f"{entry['header']}\n{entry['body']}" if entry['body'] else entry['header']
+                    entry_text = f"{entry['header']}\n{entry['body']}" if entry["body"] else entry["header"]
                     chunks = chunk_entry(entry_text, NODE_CHAR_LIMIT)
                     entry_ids = []
                     for chunk_idx, chunk_text in enumerate(chunks):
-                        eid = _record_entity_id(source_file, entry['entry_index'], chunk_idx)
+                        eid = _record_entity_id(source_file, entry["entry_index"], chunk_idx)
                         entry_ids.append(eid)
                         batch.append((
                             realm, "daily", chunk_text,
                             {
-                                "entry_index": entry['entry_index'],
-                                "entry_header_preview": entry['header'][:120],
+                                "entry_index": entry["entry_index"],
+                                "entry_header_preview": entry["header"][:120],
                                 "chunk_index": chunk_idx,
                                 "source_file": source_file,
                                 "date": date_str,

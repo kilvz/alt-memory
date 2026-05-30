@@ -1,6 +1,5 @@
 """Tests for import/export round-trip."""
 
-import copy
 
 
 class TestExport:
@@ -37,8 +36,10 @@ class TestImport:
         fresh_dim.add_entity("src", "b", "beta")
         exported = fresh_dim.export_collection()
 
+        import shutil
+        import tempfile
+
         from alt_memory.dimension import Dimension
-        import tempfile, shutil
         tmp = tempfile.mkdtemp(prefix="_test_import_")
         d2 = Dimension(path=tmp, backend="faiss")
         d2.init()
@@ -80,9 +81,9 @@ class TestImport:
                  "metadata": {"priority": "high", "tags": ["a", "b"]}}]
         count = fresh_dim.import_entities(data)
         assert count == 1
-        entity = fresh_dim.get_entity(data[0].get("entity_id") or count and list(
+        entity = fresh_dim.get_entity(data[0].get("entity_id") or (count and list(
             fresh_dim.list_entities()
-        )[0]["id"])
+        )[0]["id"]))
         # Just verify the entity exists
         assert entity is not None
 

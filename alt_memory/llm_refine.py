@@ -11,7 +11,6 @@ from dataclasses import dataclass
 
 from alt_memory.llm_client import LLMError, LLMProvider
 
-
 BATCH_SIZE = 25
 CONTEXT_LINES_PER_CANDIDATE = 3
 CONTEXT_WINDOW_CHARS = 240

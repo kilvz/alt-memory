@@ -9,7 +9,6 @@ import pytest
 from alt_memory.backends.faiss_store import FaissStore
 from alt_memory.backends.types import DEFAULT_DIM
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

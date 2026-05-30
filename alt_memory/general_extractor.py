@@ -11,7 +11,7 @@ No LLM required. Pure keyword/pattern heuristics.
 """
 
 import re
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
 
 from alt_memory.config import DEFAULT_CHUNK_SIZE
 
@@ -179,7 +179,7 @@ def _get_sentiment(text: str) -> str:
     neg = len(words & NEGATIVE_WORDS)
     if pos > neg:
         return "positive"
-    elif neg > pos:
+    if neg > pos:
         return "negative"
     return "neutral"
 
@@ -249,7 +249,7 @@ def _extract_prose(text: str) -> str:
         if not _is_code_line(line):
             prose.append(line)
     result = "\n".join(prose).strip()
-    return result if result else text
+    return result or text
 
 
 def _score_markers(text: str, markers: List[str]) -> Tuple[float, List[str]]:
@@ -317,8 +317,8 @@ def _split_into_segments(text: str) -> List[str]:
     lines = text.split("\n")
     turn_patterns = [
         re.compile(r"^>\s"),
-        re.compile(r"^(Human|User|Q)\s*:", re.I),
-        re.compile(r"^(Assistant|AI|A|Claude|ChatGPT)\s*:", re.I),
+        re.compile(r"^(Human|User|Q)\s*:", re.IGNORECASE),
+        re.compile(r"^(Assistant|AI|A|Claude|ChatGPT)\s*:", re.IGNORECASE),
     ]
     turn_count = 0
     for line in lines:

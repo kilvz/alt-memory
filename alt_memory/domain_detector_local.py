@@ -7,9 +7,10 @@ Two ways to define domains without calling any AI:
 
 import logging
 import os
-import yaml
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
+
+import yaml
 
 from alt_memory.config import normalize_realm_name
 from alt_memory.dimension import SKIP_DIRS

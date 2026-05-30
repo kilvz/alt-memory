@@ -20,9 +20,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from alt_memory.normalize import normalize
-from alt_memory.dimension import Dimension, SKIP_DIRS, mine_lock, mine_dimension_lock, ENTITY_UPSERT_BATCH_SIZE, DEFAULT_MAX_FILE_SIZE as MAX_FILE_SIZE
 from alt_memory.config import DEFAULT_CHUNK_SIZE as CHUNK_SIZE
+from alt_memory.dimension import DEFAULT_MAX_FILE_SIZE as MAX_FILE_SIZE
+from alt_memory.dimension import (
+    ENTITY_UPSERT_BATCH_SIZE,
+    SKIP_DIRS,
+    Dimension,
+    mine_dimension_lock,
+    mine_lock,
+)
+from alt_memory.normalize import normalize
 
 logger = logging.getLogger("alt_memory")
 
@@ -161,30 +168,24 @@ def file_already_mined(
         ).fetchall()
         if not rows:
             return False
-        stored_meta = None
-        if extract_mode is None:
-            stored_meta = json.loads(rows[0][0] or "{}")
-        else:
-            for row in rows:
-                meta = json.loads(row[0] or "{}")
-                if _metadata_matches_extract_mode(meta, extract_mode):
-                    stored_meta = meta
-                    break
-        if stored_meta is None:
-            return False
-        # Pre-v2 drawers have no version field — treat them as stale.
-        stored_version = stored_meta.get("normalize_version", 1)
-        if stored_version < NORMALIZE_VERSION:
-            return False
-        if check_mtime:
-            stored_mtime = stored_meta.get("source_mtime")
+        current_mtime = os.path.getmtime(source_file) if check_mtime else None
+        for row in rows:
+            meta = json.loads(row[0] or "{}")
+            if extract_mode is not None and not _metadata_matches_extract_mode(meta, extract_mode):
+                continue
+            stored_version = meta.get("normalize_version", 1)
+            if stored_version < NORMALIZE_VERSION:
+                continue
+            if not check_mtime:
+                return True
+            stored_mtime = meta.get("source_mtime")
             if stored_mtime is None:
-                return False
-            current_mtime = os.path.getmtime(source_file)
-            return abs(float(stored_mtime) - current_mtime) < 0.001
-        return True
+                continue
+            if abs(float(stored_mtime) - current_mtime) < 0.001:
+                return True
+        return False
     except Exception:
-        logger.debug("_mtime_changed failed for %s", source_file, exc_info=True)
+        logger.debug("file_already_mined failed for %s", source_file, exc_info=True)
         return False
 
 
@@ -225,8 +226,7 @@ def chunk_exchanges(
 
     if quote_lines >= 3:
         return _chunk_by_exchange(lines, chunk_size, min_chunk_size)
-    else:
-        return _chunk_by_paragraph(content, chunk_size, min_chunk_size)
+    return _chunk_by_paragraph(content, chunk_size, min_chunk_size)
 
 
 def _chunk_by_exchange(lines: list, chunk_size: int, min_chunk_size: int) -> list:

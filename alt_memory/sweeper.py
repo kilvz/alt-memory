@@ -159,18 +159,12 @@ def get_dimension_cursor(dimension, session_id: str) -> Optional[str]:
     causes silent data loss.
     """
     try:
-        import sqlite3
-
-        conn = sqlite3.connect(str(dimension._base / "dimension.db"))
-        try:
-            row = conn.execute(
-                "SELECT json_extract(metadata, '$.timestamp') FROM entities "
-                "WHERE json_extract(metadata, '$.session_id') = ? "
-                "ORDER BY json_extract(metadata, '$.timestamp') DESC LIMIT 1",
-                (session_id,),
-            ).fetchone()
-        finally:
-            conn.close()
+        row = dimension._db.execute(
+            "SELECT json_extract(metadata, '$.timestamp') FROM entities "
+            "WHERE json_extract(metadata, '$.session_id') = ? "
+            "ORDER BY json_extract(metadata, '$.timestamp') DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
     except Exception as exc:
         logger.warning(
             "sweeper: cursor lookup failed for session_id=%s (%s); "

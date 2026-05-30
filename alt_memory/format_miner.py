@@ -261,6 +261,9 @@ def mine_formats(
     if not realm:
         realm = format_path.name.lower().replace(" ", "_").replace("-", "_")
 
+    dim = Dimension(dim_path)
+    dim.init()
+
     files: list[Path] = []
     nodes_col = None
     total_entities = 0
@@ -295,9 +298,10 @@ def mine_formats(
                 except OSError:
                     source_mtime = None
 
-                if not dry_run and file_already_mined(
+                already_mined_flag = not dry_run and file_already_mined(
                     nodes_col._conn, source_file, check_mtime=True
-                ):
+                )
+                if already_mined_flag:
                     files_skipped += 1
                     continue
 
@@ -319,13 +323,13 @@ def mine_formats(
                 )
                 chunks = []
                 search_pos = 0
-                for i, c in enumerate(raw_chunks):
+                for c in raw_chunks:
                     line_start = text[:search_pos].count("\n") + 1
                     found_pos = text.find(c, search_pos)
                     if found_pos >= 0:
                         search_pos = found_pos + len(c)
                     line_end = text[:search_pos].count("\n") + 1
-                    chunk = {"content": c, "chunk_index": i, "source_file": source_file}
+                    chunk = {"content": c, "chunk_index": len(chunks), "source_file": source_file}
                     if found_pos >= 0:
                         chunk["line_start"] = line_start
                         chunk["line_end"] = line_end
@@ -346,7 +350,7 @@ def mine_formats(
 
                 entities_added = 0
                 with mine_lock(source_file):
-                    if file_already_mined(
+                    if already_mined_flag or file_already_mined(
                         nodes_col._conn, source_file, check_mtime=True
                     ):
                         files_skipped += 1
@@ -360,7 +364,7 @@ def mine_formats(
                         for chunk in batch:
                             entity_id = _format_entity_id(realm, domain, source_file, chunk["chunk_index"])
                             content = chunk["content"]
-                            entities = _extract_entities_for_metadata(content)
+                            entities = _extract_entities_for_metadata(content, dim=dim)
                             meta = {
                                 "realm": realm,
                                 "domain": domain,
@@ -404,8 +408,6 @@ def mine_formats(
 
     else:
         if not dry_run:
-            dim = Dimension(dim_path)
-            dim.init()
             _compute_topic_tunnels_for_wing(realm, dim)
 
     finally:

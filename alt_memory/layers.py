@@ -41,6 +41,7 @@ class MemoryStack:
     def __init__(self, dimension: Dimension, identity_path: Optional[str] = None):
         self._dimension = dimension
         self._identity_path = identity_path or os.path.expanduser("~/.alt-memory/identity.txt")
+        self._identity_cache: Optional[str] = None
 
     def _validate_layer(self, layer: int) -> None:
         if layer not in self.LAYER_NAMES:
@@ -111,12 +112,9 @@ class MemoryStack:
         """
         realm = self._realm_for(agent_name)
 
-        l3_entries = self._dimension.list_entities(
-            realm=realm, domain="layer_3_archive", limit=1000,
-        )
-        l1_entries = self._dimension.list_entities(
-            realm=realm, domain="layer_1_essential", limit=1000,
-        )
+        all_entries = self._dimension.list_entities(realm=realm, limit=1000)
+        l3_entries = [e for e in all_entries if e.get("metadata", {}).get("domain") == "layer_3_archive"]
+        l1_entries = [e for e in all_entries if e.get("metadata", {}).get("domain") == "layer_1_essential"]
 
         l3_summary = ""
         if l3_entries:
@@ -175,9 +173,30 @@ class MemoryStack:
 
         Returns dict mapping layer_number -> list of entries
         """
+        realm = self._realm_for(agent_name)
+        domain_names = set(self.LAYER_NAMES.values())
+        all_in_realm = self._dimension.list_entities(realm=realm, limit=1000)
+        by_domain: dict[str, list[dict]] = {}
+        for e in all_in_realm:
+            d = e.get("metadata", {}).get("domain", "")
+            if d in domain_names:
+                by_domain.setdefault(d, []).append(e)
         result = {}
         for layer in sorted(self.LAYER_NAMES):
-            result[layer] = self.read(agent_name, layer, last_n=last_n)
+            domain = self.LAYER_NAMES[layer]
+            entries = by_domain.get(domain, [])
+            entries.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+            out = []
+            for e in entries[:last_n]:
+                meta = e.get("metadata", {})
+                out.append({
+                    "id": e.get("id", ""),
+                    "content": e.get("content", ""),
+                    "metadata": meta,
+                    "created_at": e.get("created_at", ""),
+                    "topic": meta.get("topic", "general"),
+                })
+            result[layer] = out
         return result
 
     def clear_layer(self, agent_name: str, layer: int) -> bool:
@@ -227,26 +246,19 @@ class MemoryStack:
 
     def _load_l0_identity(self) -> str:
         """Load identity from ~/.alt-memory/identity.txt or return a sensible default."""
+        if self._identity_cache is not None:
+            return self._identity_cache
         path = self._identity_path
         if os.path.exists(path):
             with open(path, "r", encoding="utf-8") as f:
-                return f.read().strip()
+                self._identity_cache = f.read().strip()
+                return self._identity_cache
         return "## L0 \u2014 IDENTITY\nNo identity configured. Create ~/.alt-memory/identity.txt"
 
     def _generate_l1_essential(self, realm: Optional[str] = None) -> str:
         """Auto-generate essential story from top-scored dimension entities."""
         dim = self._dimension
-        _BATCH = 500
-        entities = []
-        offset = 0
-        while True:
-            batch = dim.list_entities(realm=realm, limit=_BATCH, offset=offset)
-            if not batch:
-                break
-            entities.extend(batch)
-            offset += len(batch)
-            if len(batch) < _BATCH or len(entities) >= self.MAX_SCAN:
-                break
+        entities = dim.list_entities(realm=realm, limit=self.MAX_SCAN)
 
         if not entities:
             return "## L1 \u2014 No memories yet."

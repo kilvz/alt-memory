@@ -21,7 +21,6 @@ import hashlib
 import json
 import logging
 import os
-import sqlite3
 import threading
 import time
 from collections import Counter, defaultdict, deque
@@ -89,62 +88,56 @@ def build_graph(dimension=None, config=None):
         if _graph_cache_nodes is not None and (now - _graph_cache_time) < _GRAPH_CACHE_TTL:
             return _graph_cache_nodes, _graph_cache_edges
 
-    if dimension is None:
-        dimension = _get_dimension(config)
-    if not dimension:
-        return {}, []
+        if dimension is None:
+            dimension = _get_dimension(config)
+        if not dimension:
+            return {}, []
 
-    conn = None
-    try:
-        conn = sqlite3.connect(str(dimension._base / "dimension.db"))
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute("SELECT id, realm, domain, metadata FROM entities").fetchall()
-    finally:
-        if conn:
-            conn.close()
+        rows = dimension._db.execute(
+            "SELECT id, realm, domain, metadata FROM entities"
+        ).fetchall()
 
-    domain_data = defaultdict(lambda: {"realms": set(), "gates": set(), "count": 0, "dates": set()})
+        domain_data = defaultdict(lambda: {"realms": set(), "gates": set(), "count": 0, "dates": set()})
 
-    for row in rows:
-        meta = json.loads(row["metadata"] or "{}")
-        domain = row["domain"] or meta.get("domain", "")
-        realm = row["realm"] or meta.get("realm", "")
-        gate = meta.get("gate", "")
-        date = meta.get("date", "")
-        if domain and domain != "general" and realm:
-            domain_data[domain]["realms"].add(realm)
-            if gate:
-                domain_data[domain]["gates"].add(gate)
-            if date:
-                domain_data[domain]["dates"].add(date)
-            domain_data[domain]["count"] += 1
+        for row in rows:
+            meta = json.loads(row["metadata"] or "{}")
+            domain = row["domain"] or meta.get("domain", "")
+            realm = row["realm"] or meta.get("realm", "")
+            gate = meta.get("gate", "")
+            date = meta.get("date", "")
+            if domain and domain != "general" and realm:
+                domain_data[domain]["realms"].add(realm)
+                if gate:
+                    domain_data[domain]["gates"].add(gate)
+                if date:
+                    domain_data[domain]["dates"].add(date)
+                domain_data[domain]["count"] += 1
 
-    edges = []
-    for domain, data in domain_data.items():
-        realms = sorted(data["realms"])
-        if len(realms) >= 2:
-            for i, ra in enumerate(realms):
-                for rb in realms[i + 1:]:
-                    for gate in data["gates"]:
-                        edges.append({
-                            "domain": domain,
-                            "realm_a": ra,
-                            "realm_b": rb,
-                            "gate": gate,
-                            "count": data["count"],
-                        })
+        edges = []
+        for domain, data in domain_data.items():
+            realms = sorted(data["realms"])
+            if len(realms) >= 2:
+                for i, ra in enumerate(realms):
+                    for rb in realms[i + 1:]:
+                        for gate in data["gates"]:
+                            edges.append({
+                                "domain": domain,
+                                "realm_a": ra,
+                                "realm_b": rb,
+                                "gate": gate,
+                                "count": data["count"],
+                            })
 
-    nodes = {}
-    for domain, data in domain_data.items():
-        nodes[domain] = {
-            "realms": sorted(data["realms"]),
-            "gates": sorted(data["gates"]),
-            "count": data["count"],
-            "dates": sorted(data["dates"])[-5:] if data["dates"] else [],
-        }
+        nodes = {}
+        for domain, data in domain_data.items():
+            nodes[domain] = {
+                "realms": sorted(data["realms"]),
+                "gates": sorted(data["gates"]),
+                "count": data["count"],
+                "dates": sorted(data["dates"])[-5:] if data["dates"] else [],
+            }
 
-    if nodes or edges:
-        with _graph_cache_lock:
+        if nodes or edges:
             _graph_cache_nodes = nodes
             _graph_cache_edges = edges
             _graph_cache_time = time.time()
@@ -319,40 +312,44 @@ def _load_tunnels(config=None, dimension=None):
     are supplied.
     """
     tunnel_file = _tunnel_file(config=config, dimension=dimension)
+    stat_result = None
 
     # Check in-memory cache (under lock)
     with _tunnel_cache_lock:
         try:
-            stat = os.stat(tunnel_file)
+            stat_result = os.stat(tunnel_file)
             cached_mtime = _tunnel_cache_mtime.get(tunnel_file)
-            if cached_mtime is not None and stat.st_mtime_ns == cached_mtime:
+            if cached_mtime is not None and stat_result.st_mtime_ns == cached_mtime:
                 cached = _tunnel_cache.get(tunnel_file)
                 if cached is not None:
                     return list(cached)
         except OSError:
             pass
 
-    if os.path.exists(tunnel_file):
-        try:
-            with open(tunnel_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception:
-            logger.warning(
-                "Tunnels file '%s' is corrupt or unreadable; starting empty.",
-                tunnel_file,
-            )
-            data = []
-        result = data if isinstance(data, list) else []
-    else:
+    try:
+        with open(tunnel_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
         result = []
+    except Exception:
+        logger.warning(
+            "Tunnels file '%s' is corrupt or unreadable; starting empty.",
+            tunnel_file,
+        )
+        result = []
+    else:
+        result = data if isinstance(data, list) else []
 
     # Update cache (under lock)
     with _tunnel_cache_lock:
         _tunnel_cache[tunnel_file] = list(result)
-        try:
-            _tunnel_cache_mtime[tunnel_file] = os.stat(tunnel_file).st_mtime_ns
-        except OSError:
-            _tunnel_cache_mtime.pop(tunnel_file, None)
+        if stat_result is not None:
+            _tunnel_cache_mtime[tunnel_file] = stat_result.st_mtime_ns
+        else:
+            try:
+                _tunnel_cache_mtime[tunnel_file] = os.stat(tunnel_file).st_mtime_ns
+            except OSError:
+                _tunnel_cache_mtime.pop(tunnel_file, None)
     return result
 
 
@@ -426,10 +423,9 @@ def _check_domain_exists(realm: str, domain: str, dimension) -> bool:
     if dimension is None:
         return True
     try:
-        with sqlite3.connect(str(dimension._base / "dimension.db")) as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM entities WHERE realm=? AND domain=?", (realm, domain)
-            ).fetchone()
+        row = dimension._db.execute(
+            "SELECT COUNT(*) FROM entities WHERE realm=? AND domain=?", (realm, domain)
+        ).fetchone()
         return row[0] > 0
     except Exception:
         logger.warning(
@@ -609,12 +605,18 @@ def follow_tunnels(realm: str, domain: str, dimension=None, config=None):
 
     if dimension and connections:
         try:
-            for c in connections:
-                eid = c.get("entity_id")
-                if eid:
-                    entity = dimension.get_entity(eid)
-                    if entity:
-                        c["entity_preview"] = entity["content"][:300]
+            entity_ids = [c["entity_id"] for c in connections if c.get("entity_id")]
+            if entity_ids:
+                placeholders = ",".join("?" * len(entity_ids))
+                rows = dimension._db.execute(
+                    f"SELECT id, content FROM entities WHERE id IN ({placeholders})",
+                    entity_ids,
+                ).fetchall()
+                entity_map = {r[0]: r[1] for r in rows}
+                for c in connections:
+                    eid = c.get("entity_id")
+                    if eid and eid in entity_map:
+                        c["entity_preview"] = entity_map[eid][:300]
         except Exception:
             logger.debug("Entity preview hydration failed", exc_info=True)
 

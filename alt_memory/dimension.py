@@ -108,12 +108,11 @@ def mine_lock(source_file: str):
     lock_path = os.path.join(
         lock_dir, hashlib.sha256(source_file.encode()).hexdigest()[:16] + ".lock"
     )
-    if not os.path.exists(lock_path):
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
-            os.close(fd)
-        except FileExistsError:
-            pass
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except FileExistsError:
+        pass
     lf = open(lock_path, "r+b")
     try:
         if os.name == "nt":
@@ -216,12 +215,11 @@ def mine_dimension_lock(dim_path: str):
         yield
         return
 
-    if not os.path.exists(lock_path):
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
-            os.close(fd)
-        except FileExistsError:
-            pass
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+        os.close(fd)
+    except FileExistsError:
+        pass
     lf = open(lock_path, "r+b")
     acquired = False
     try:
@@ -503,6 +501,8 @@ class Dimension:
     def _load_embedder(self, is_new: bool = False, device: Optional[str] = None) -> Any:
         config_path = self._base / "dimension.json"
         model = "sentence"
+        default_embedder = "numpy"
+        embedding_device = None
         if config_path.exists():
             with open(config_path) as f:
                 config = json.load(f)
@@ -515,11 +515,13 @@ class Dimension:
             model = mapping.get(model, model)
         else:
             from alt_memory.config import AltMemoryConfig
-            model = AltMemoryConfig().default_embedder
+            cfg = AltMemoryConfig()
+            default_embedder = cfg.default_embedder
+            model = default_embedder
+            embedding_device = cfg.embedding_device
         model = self._resolve_embedder(model, config_path)
         if device is None:
-            from alt_memory.config import AltMemoryConfig
-            device = AltMemoryConfig().embedding_device
+            device = embedding_device
         return get_embedder(model=model, model_dir=str(self._data_dir), device=device)
 
     @staticmethod
@@ -1537,18 +1539,21 @@ class Dimension:
 
 
 _DIMENSION_PERSONA_CACHE: dict[str, str] = {}
+_persona_cache_lock = threading.Lock()
 
 
 def _get_dimension_persona(dim_path: str) -> str:
-    cached = _DIMENSION_PERSONA_CACHE.get(dim_path)
-    if cached is not None:
-        return cached
+    with _persona_cache_lock:
+        cached = _DIMENSION_PERSONA_CACHE.get(dim_path)
+        if cached is not None:
+            return cached
     cfg_path = Path(dim_path) / "persona.json"
     if cfg_path.exists():
         try:
             data = json.loads(cfg_path.read_text())
             name = data.get("persona", "")
-            _DIMENSION_PERSONA_CACHE[dim_path] = name
+            with _persona_cache_lock:
+                _DIMENSION_PERSONA_CACHE[dim_path] = name
             return name
         except (json.JSONDecodeError, OSError):
             pass
@@ -1558,7 +1563,8 @@ def _get_dimension_persona(dim_path: str) -> str:
 def _set_dimension_persona(dim_path: str, name: str) -> None:
     cfg_path = Path(dim_path) / "persona.json"
     cfg_path.write_text(json.dumps({"persona": name}, indent=2))
-    _DIMENSION_PERSONA_CACHE[dim_path] = name
+    with _persona_cache_lock:
+        _DIMENSION_PERSONA_CACHE[dim_path] = name
 
 
 # ==================== Closet-line entity extraction (for record_ingest) ====================

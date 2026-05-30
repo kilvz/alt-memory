@@ -584,7 +584,7 @@ def prefetch_mined_set(dim, extract_mode: Optional[str] = None) -> set[str]:
     mined: set[str] = set()
     try:
         rows = dim._db.execute(
-            "SELECT source_file, metadata FROM entities WHERE source_file != ''"
+            "SELECT source_file, metadata FROM entities WHERE source_file != '' LIMIT 100000"
         ).fetchall()
         for src, meta_json in rows:
             meta = json.loads(meta_json or "{}")

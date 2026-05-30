@@ -346,11 +346,14 @@ class EntityRegistry:
         visited = {canonical}
         results = []
         current = [(canonical, 0)]
+        all_facts = self._kg.query()
 
         for _ in range(max_distance):
             nxt = []
             for node, dist in current:
-                for f in self._kg.query(entity=node, direction="outgoing"):
+                for f in all_facts:
+                    if f.get("subject") != node:
+                        continue
                     if f["predicate"] == "is_a":
                         continue
                     if f["object"] not in visited:
@@ -364,7 +367,9 @@ class EntityRegistry:
                         if dist + 1 < max_distance:
                             nxt.append((f["object"], dist + 1))
 
-                for f in self._kg.query(entity=node, direction="incoming"):
+                for f in all_facts:
+                    if f.get("object") != node:
+                        continue
                     if f["subject"] not in visited:
                         visited.add(f["subject"])
                         entry = {
@@ -428,11 +433,17 @@ class EntityRegistry:
         Returns list of (name_a, name_b, similarity) tuples.
         Similarity based on edit distance and shared relationships.
         """
-        facts = self._kg.query()
+        all_facts = self._kg.query()
         entities = set()
-        for f in facts:
+        for f in all_facts:
             if f["predicate"] == "is_a":
                 entities.add(f["subject"])
+
+        by_entity: dict[str, set[str]] = {}
+        for f in all_facts:
+            subj = f["subject"]
+            if f["predicate"] != "is_a":
+                by_entity.setdefault(subj, set()).add(f"{f['predicate']}:{f['object']}")
 
         entity_list = sorted(entities)
         suggestions = []
@@ -447,14 +458,8 @@ class EntityRegistry:
 
                 name_sim = SequenceMatcher(None, a.lower(), b.lower()).ratio()
 
-                a_preds = set()
-                b_preds = set()
-                for f in self._kg.query(entity=a, direction="outgoing"):
-                    if f["predicate"] != "is_a":
-                        a_preds.add(f"{f['predicate']}:{f['object']}")
-                for f in self._kg.query(entity=b, direction="outgoing"):
-                    if f["predicate"] != "is_a":
-                        b_preds.add(f"{f['predicate']}:{f['object']}")
+                a_preds = by_entity.get(a, set())
+                b_preds = by_entity.get(b, set())
 
                 rel_sim = 0.0
                 if a_preds and b_preds:

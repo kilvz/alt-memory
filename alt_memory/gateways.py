@@ -30,7 +30,6 @@ import hashlib
 import json
 import logging
 import os
-import sqlite3
 import tempfile
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -44,9 +43,16 @@ from alt_memory.dimension import Dimension
 
 logger = logging.getLogger("alt_memory_gateways")
 
-# Derived from AltMemoryConfig so it respects the configured dim_path.
+_GATEWAY_FILE_PATH: Optional[str] = None
+_GATEWAY_FILE_LOCK = threading.Lock()
+
 def _gateway_file() -> str:
-    return AltMemoryConfig().gateway_file
+    global _GATEWAY_FILE_PATH
+    if _GATEWAY_FILE_PATH is None:
+        with _GATEWAY_FILE_LOCK:
+            if _GATEWAY_FILE_PATH is None:
+                _GATEWAY_FILE_PATH = AltMemoryConfig().gateway_file
+    return _GATEWAY_FILE_PATH
 
 _SCHEMA_VERSION = 1
 
@@ -73,27 +79,26 @@ def _load_gateways() -> list[dict]:
     """Read all gateway records. Returns ``[]`` if the file is missing or corrupt."""
     global _gateway_cache, _gateway_cache_mtime
 
-    # Check in-memory cache
-    gateway_file = _gateway_file()
-    try:
-        stat = os.stat(gateway_file)
-        if _gateway_cache is not None and stat.st_mtime_ns == _gateway_cache_mtime:
+    with _gateway_lock:
+        if _gateway_cache is not None:
             return list(_gateway_cache)
-    except OSError:
-        pass
 
-    if not os.path.exists(gateway_file):
-        _gateway_cache = []
-        _gateway_cache_mtime = 0
-        return []
+    gateway_file = _gateway_file()
     try:
         with open(gateway_file, encoding="utf-8") as f:
             raw = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        logger.debug("gateways: load failed, treating as empty", exc_info=True)
-        _gateway_cache = []
-        _gateway_cache_mtime = 0
+    except OSError:
+        with _gateway_lock:
+            _gateway_cache = []
+            _gateway_cache_mtime = 0
         return []
+    except json.JSONDecodeError:
+        logger.debug("gateways: load failed, treating as empty", exc_info=True)
+        with _gateway_lock:
+            _gateway_cache = []
+            _gateway_cache_mtime = 0
+        return []
+
     if isinstance(raw, dict) and "gateways" in raw:
         result = raw.get("gateways") or []
     elif isinstance(raw, list):
@@ -101,12 +106,12 @@ def _load_gateways() -> list[dict]:
     else:
         result = []
 
-    # Update cache
-    _gateway_cache = list(result)
-    try:
-        _gateway_cache_mtime = os.stat(gateway_file).st_mtime_ns
-    except OSError:
-        _gateway_cache_mtime = 0
+    with _gateway_lock:
+        _gateway_cache = list(result)
+        try:
+            _gateway_cache_mtime = os.stat(gateway_file).st_mtime_ns
+        except OSError:
+            _gateway_cache_mtime = 0
     return result
 
 
@@ -143,12 +148,12 @@ def _save_gateways(gateways: list[dict]) -> None:
             pass
         raise
 
-    # Update in-memory cache
-    _gateway_cache = list(gateways)
-    try:
-        _gateway_cache_mtime = os.stat(gateway_file).st_mtime_ns
-    except OSError:
-        _gateway_cache_mtime = 0
+    with _gateway_lock:
+        _gateway_cache = list(gateways)
+        try:
+            _gateway_cache_mtime = os.stat(gateway_file).st_mtime_ns
+        except OSError:
+            _gateway_cache_mtime = 0
 
 
 # --------------------------------------------------------------------------
@@ -233,16 +238,9 @@ def compute_gateways_for_realm(
     try:
         dim = Dimension(dim_path)
         dim.init()
-        conn = None
-        try:
-            conn = sqlite3.connect(str(dim._base / "dimension.db"))
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
+        rows = dim._db.execute(
             "SELECT id, content, metadata FROM entities WHERE realm = ?", (realm,)
         ).fetchall()
-        finally:
-            if conn:
-                conn.close()
     except Exception:
         logger.warning(
             "compute_gateways_for_realm: query failed for %s", realm, exc_info=True

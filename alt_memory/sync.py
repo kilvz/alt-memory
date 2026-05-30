@@ -255,57 +255,57 @@ def sync_dimension(
     dimension = Dimension(dimension_path)
     dimension.init()
     try:
-        with dimension._lock:
-            conn = dimension._db
+        conn = dimension._db
 
-            if project_dirs is not None:
-                roots = _normalize_project_dirs(project_dirs)
+        if project_dirs is not None:
+            roots = _normalize_project_dirs(project_dirs)
+        else:
+            roots = _auto_detect_project_roots(dimension, realm, conn=conn)
+
+        matcher_cache: dict = {}
+        classification_cache: dict = {}
+
+        for entity_id, meta in _iter_entity_metadata(dimension, realm, conn=conn):
+            counts["scanned"] += 1
+            meta = meta or {}
+            source_file = meta.get("source_file")
+
+            if _is_registry_row(meta, entity_id):
+                bucket = "kept"
+            elif source_file and source_file in classification_cache:
+                bucket = classification_cache[source_file]
             else:
-                roots = _auto_detect_project_roots(dimension, realm, conn=conn)
+                bucket = _classify_entity(meta, matcher_cache, roots, entity_id)
+                if source_file:
+                    classification_cache[source_file] = bucket
 
-            matcher_cache: dict = {}
-            classification_cache: dict = {}
+            counts[bucket] += 1
+            if bucket in ("gitignored", "missing"):
+                removable_ids.append(entity_id)
+                if source_file:
+                    removable_sources.add(source_file)
+                    by_source[source_file] += 1
 
-            for entity_id, meta in _iter_entity_metadata(dimension, realm, conn=conn):
-                counts["scanned"] += 1
-                meta = meta or {}
-                source_file = meta.get("source_file")
+        report: SyncReport = {
+            **counts,
+            "removed_entities": 0,
+            "removed_nodes": 0,
+            "dry_run": dry_run,
+            "by_source": dict(by_source),
+        }
 
-                if _is_registry_row(meta, entity_id):
-                    bucket = "kept"
-                elif source_file and source_file in classification_cache:
-                    bucket = classification_cache[source_file]
-                else:
-                    bucket = _classify_entity(meta, matcher_cache, roots, entity_id)
-                    if source_file:
-                        classification_cache[source_file] = bucket
+        if dry_run or not removable_ids:
+            return report
 
-                counts[bucket] += 1
-                if bucket in ("gitignored", "missing"):
-                    removable_ids.append(entity_id)
-                    if source_file:
-                        removable_sources.add(source_file)
-                        by_source[source_file] += 1
+        report["removed_entities"] = _delete_in_batches(dimension, removable_ids, wal_log=wal_log)
 
-            report: SyncReport = {
-                **counts,
-                "removed_entities": 0,
-                "removed_nodes": 0,
-                "dry_run": dry_run,
-                "by_source": dict(by_source),
-            }
-
-            if dry_run or not removable_ids:
-                return report
-
-            report["removed_entities"] = _delete_in_batches(dimension, removable_ids, wal_log=wal_log)
-
-            node_rows = 0
-            if removable_sources:
-                nodes_col = get_nodes_collection(str(dimension._base))
-                for src in removable_sources:
-                    node_rows += purge_file_nodes(nodes_col, src)
-            report["removed_nodes"] = node_rows
+        node_rows = 0
+        if removable_sources:
+            placeholders = ",".join("?" * len(removable_sources))
+            dimension._db.execute(f"DELETE FROM nodes WHERE source_file IN ({placeholders})", list(removable_sources))
+            node_rows = dimension._db.execute("SELECT changes()").fetchone()[0]
+            dimension._db.commit()
+        report["removed_nodes"] = node_rows
 
         return report
     finally:

@@ -56,6 +56,8 @@ _WAL_FILE = os.path.join(
     os.environ.get("ALT_MEMORY_HOME", os.path.expanduser("~/.alt-memory")),
     "mcp_wal.jsonl",
 )
+_MCP_CONFIG = AltMemoryConfig()
+
 # Keep WAL file handle open to avoid open/close syscall per MCP write.
 _WAL_HANDLE = None
 _WAL_LOCK = threading.Lock()
@@ -128,6 +130,7 @@ def _close_wal() -> None:
 _MCP_IDLE_HOURS_ENV = "ALT_MEMORY_MCP_IDLE_HOURS"
 _MCP_IDLE_HOURS_DEFAULT = 8.0
 _last_request_time: float = time.monotonic()
+_last_request_lock = threading.Lock()
 
 
 def _mcp_idle_timeout_secs() -> float:
@@ -150,7 +153,8 @@ def _start_idle_exit_watchdog() -> None:
     def _watchdog() -> None:
         while True:
             time.sleep(check_interval)
-            idle = time.monotonic() - _last_request_time
+            with _last_request_lock:
+                idle = time.monotonic() - _last_request_time
             if idle >= timeout:
                 logger.info(
                     "MCP server idle for %.1f h (limit %.1f h); exiting to release file handles.",
@@ -864,18 +868,21 @@ class MCPServer:
         self._metadata_cache: Optional[dict] = None
         self._metadata_cache_time: float = 0.0
         self._metadata_cache_ttl: float = 5.0
+        self._metadata_cache_lock = threading.Lock()
 
         self._methods: dict[str, tuple] = {}
         self._register_all()
 
     def _invalidate_metadata_cache(self) -> None:
-        self._metadata_cache = None
-        self._metadata_cache_time = 0.0
+        with self._metadata_cache_lock:
+            self._metadata_cache = None
+            self._metadata_cache_time = 0.0
 
     def _fetch_all_metadata(self) -> dict:
         now = time.monotonic()
-        if self._metadata_cache is not None and (now - self._metadata_cache_time) < self._metadata_cache_ttl:
-            return self._metadata_cache
+        with self._metadata_cache_lock:
+            if self._metadata_cache is not None and (now - self._metadata_cache_time) < self._metadata_cache_ttl:
+                return self._metadata_cache
         realms = self.dim.list_realms()
         domains = self.dim._db_execute(
             "SELECT name, realm, description, created_at FROM domains ORDER BY realm, name"
@@ -888,8 +895,9 @@ class MCPServer:
             "total_entities": total,
             "total_domains": total_domains,
         }
-        self._metadata_cache = data
-        self._metadata_cache_time = now
+        with self._metadata_cache_lock:
+            self._metadata_cache = data
+            self._metadata_cache_time = now
         return data
 
     def _register(self, name: str, handler: callable, required: list[str] | None = None):
@@ -982,8 +990,9 @@ class MCPServer:
         """Process one JSON-RPC request line, return JSON response string.
         Returns None for notifications (no ``id`` field).
         """
-        global _last_request_time
-        _last_request_time = time.monotonic()
+        global _last_request_time, _last_request_lock
+        with _last_request_lock:
+            _last_request_time = time.monotonic()
 
         try:
             req = json.loads(raw)
@@ -1453,9 +1462,8 @@ class MCPServer:
         return {"reconnected": ok}
 
     def _hook_settings(self, params: dict) -> dict:
-        config = AltMemoryConfig()
         if params:
-            return config.set_hook_settings(
+            return _MCP_CONFIG.set_hook_settings(
                 silent_save=params.get("silent_save"),
                 desktop_toast=params.get("desktop_toast"),
             )
@@ -1478,12 +1486,10 @@ class MCPServer:
         )
 
     def _get_default_embedder(self, params: dict) -> dict:
-        from alt_memory.config import AltMemoryConfig
-        return {"default_embedder": AltMemoryConfig().default_embedder}
+        return {"default_embedder": _MCP_CONFIG.default_embedder}
 
     def _set_default_embedder(self, params: dict) -> dict:
-        from alt_memory.config import AltMemoryConfig
-        model = AltMemoryConfig().set_default_embedder(params["model"])
+        model = _MCP_CONFIG.set_default_embedder(params["model"])
         return {"default_embedder": model}
 
     def _list_agents(self, params: dict) -> list:
@@ -1496,12 +1502,10 @@ class MCPServer:
         return sorted(agents)
 
     def _get_people_map(self, params: dict) -> dict:
-        from alt_memory.config import AltMemoryConfig
-        return AltMemoryConfig().people_map
+        return _MCP_CONFIG.people_map
 
     def _set_people_map(self, params: dict) -> dict:
-        from alt_memory.config import AltMemoryConfig
-        AltMemoryConfig().save_people_map(params.get("map", {}))
+        _MCP_CONFIG.save_people_map(params.get("map", {}))
         return {"saved": True}
 
     def _batch_add_entities(self, params: dict) -> dict:

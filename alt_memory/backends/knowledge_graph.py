@@ -127,13 +127,12 @@ class KnowledgeGraph:
             logger.info("_migrate_schema: migrated source_drawer_id → source_entity_id")
 
     def _conn(self):
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("KnowledgeGraph is closed")
-            if self._connection is None:
+        if self._closed:
+            raise RuntimeError("KnowledgeGraph is closed")
+        if self._connection is None:
             self._connection = sqlite3.connect(str(self._db_path), check_same_thread=False)
             self._connection.row_factory = sqlite3.Row
-            return self._connection
+        return self._connection
 
     @staticmethod
     def _entity_id(name: str) -> str:
@@ -406,10 +405,10 @@ class KnowledgeGraph:
                         "valid_from": r["valid_from"],
                         "valid_to": r["valid_to"],
                         "confidence": r["confidence"] if r["confidence"] is not None else 1.0,
-                        "source_node": r.get("source_node"),
-                        "source_file": r.get("source_file"),
-                        "source_entity_id": r.get("source_entity_id"),
-                        "adapter_name": r.get("adapter_name"),
+                        "source_node": r["source_node"] if "source_node" in r.keys() else None,
+                        "source_file": r["source_file"] if "source_file" in r.keys() else None,
+                        "source_entity_id": r["source_entity_id"] if "source_entity_id" in r.keys() else None,
+                        "adapter_name": r["adapter_name"] if "adapter_name" in r.keys() else None,
                         "current": r["valid_to"] is None,
                     })
             if direction in ("incoming", "both"):
@@ -425,10 +424,10 @@ class KnowledgeGraph:
                         "valid_from": r["valid_from"],
                         "valid_to": r["valid_to"],
                         "confidence": r["confidence"] if r["confidence"] is not None else 1.0,
-                        "source_node": r.get("source_node"),
-                        "source_file": r.get("source_file"),
-                        "source_entity_id": r.get("source_entity_id"),
-                        "adapter_name": r.get("adapter_name"),
+                        "source_node": r["source_node"] if "source_node" in r.keys() else None,
+                        "source_file": r["source_file"] if "source_file" in r.keys() else None,
+                        "source_entity_id": r["source_entity_id"] if "source_entity_id" in r.keys() else None,
+                        "adapter_name": r["adapter_name"] if "adapter_name" in r.keys() else None,
                         "current": r["valid_to"] is None,
                     })
         return results

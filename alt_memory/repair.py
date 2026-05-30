@@ -15,12 +15,10 @@ from pathlib import Path
 from typing import Optional
 
 from alt_memory.repair_utils import (
-    confirm_destructive_action,
     rebuild_fts5,
     run_vacuum,
     sqlite_entity_count,
     sqlite_integrity_errors,
-    _verify_entity_count,
 )
 
 logger = logging.getLogger(__name__)
@@ -249,7 +247,7 @@ def scan_dimension(dim_path: Optional[str] = None) -> tuple[set[str], set[str]]:
     good = sqlite_ids & vector_ids
     bad = (sqlite_ids - vector_ids) | (vector_ids - sqlite_ids)
 
-    print(f"\n  Scan complete.")
+    print("\n  Scan complete.")
     print(f"  GOOD: {len(good):,}")
     print(f"  BAD:  {len(bad):,}")
 

@@ -12,16 +12,9 @@ v1 — current: adds _meta version tracking table and content_date column
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import sqlite3
 from pathlib import Path
-from typing import Optional
-
-import numpy as np
-
-from alt_memory.backends.embedder import get_embedder
 
 logger = logging.getLogger(__name__)
 

@@ -18,7 +18,6 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import Optional
 
 logger = logging.getLogger("alt_memory")
 

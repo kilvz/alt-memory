@@ -240,7 +240,6 @@ def _extract_json(text: str) -> Optional[dict]:
 
 
 def detect_origin_llm(samples: list[str], provider) -> CorpusOriginResult:
-    from alt_memory.llm_client import LLMProvider
 
     max_excerpt_chars = 800
     excerpts = "\n\n---\n\n".join(

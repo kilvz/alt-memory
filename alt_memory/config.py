@@ -7,7 +7,6 @@ import json
 import os
 import re
 from datetime import date, datetime
-from functools import lru_cache
 from pathlib import Path
 
 MAX_NAME_LENGTH = 128

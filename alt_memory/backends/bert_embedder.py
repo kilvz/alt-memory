@@ -13,7 +13,6 @@ import struct
 import threading
 import urllib.request
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 

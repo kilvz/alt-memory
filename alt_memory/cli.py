@@ -3,11 +3,9 @@
 import argparse
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 
-import alt_memory
 from alt_memory.dimension import Dimension
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
@@ -83,7 +81,7 @@ def main():
     p_kgi.add_argument("--object", "-o", required=True)
     p_kgi.add_argument("--ended")
 
-    p_kg_stats = sub.add_parser("kg-stats", help="KG statistics")
+    sub.add_parser("kg-stats", help="KG statistics")
 
     p_record = sub.add_parser("record", help="Write record entry")
     p_record.add_argument("--agent", "-a", required=True)
@@ -104,7 +102,7 @@ def main():
     p_dedup.add_argument("content")
     p_dedup.add_argument("--threshold", type=float, default=0.9)
 
-    p_rebuild = sub.add_parser("rebuild-fts", help="Rebuild FTS index")
+    sub.add_parser("rebuild-fts", help="Rebuild FTS index")
     p_aaak = sub.add_parser("aaak", help="Compress text to AAAK")
     p_aaak.add_argument("text", nargs="?", default="")
     p_aaak.add_argument("--output-format", choices=["aaak", "json"],
@@ -175,9 +173,9 @@ def main():
     p_repair.add_argument("--rebuild-fts", action="store_true", help="Rebuild FTS5 index")
     p_repair.add_argument("--yes", "-y", action="store_true", help="Skip confirmation")
 
-    p_repair_status = sub.add_parser("repair-status", help="Dimension health check")
+    sub.add_parser("repair-status", help="Dimension health check")
 
-    p_rebuild_sqlite = sub.add_parser("rebuild-from-sqlite", help="Rebuild FAISS from SQLite ground truth")
+    sub.add_parser("rebuild-from-sqlite", help="Rebuild FAISS from SQLite ground truth")
 
     p_wake = sub.add_parser("wake-up", help="Show L0+L1 wake-up context (dimension-scoped or agent records)")
     p_wake.add_argument("--agent", default=None, help="Agent name (omit for dimension-scoped wake-up)")

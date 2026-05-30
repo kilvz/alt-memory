@@ -25,7 +25,6 @@ try:
 except ImportError:
     HAS_HTTP = False
 
-from alt_memory import dialect
 from alt_memory.dialect import aaak_compress, aaak_decompress, aaak_parse_entry
 from alt_memory.entity_registry import EntityRegistry
 from alt_memory import dim_graph

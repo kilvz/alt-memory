@@ -14,7 +14,10 @@ import re
 import logging
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from alt_memory.entity_registry import EntityRegistry
 
 from alt_memory.i18n import get_entity_patterns
 from alt_memory.dimension import SKIP_DIRS, _ENTITY_STOPLIST

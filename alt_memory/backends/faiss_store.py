@@ -16,6 +16,8 @@ from typing import Optional
 import faiss
 import numpy as np
 
+from alt_memory.backends.types import DEFAULT_DIM
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,9 +29,6 @@ def _sql_val(v):
     if isinstance(v, (int, float)):
         return v
     return str(v)
-
-
-from alt_memory.backends.types import DEFAULT_DIM
 
 
 class FaissStore:

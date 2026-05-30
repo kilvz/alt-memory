@@ -4,7 +4,7 @@ import json
 import logging
 import sqlite3
 import threading
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Optional
 

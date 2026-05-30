@@ -393,7 +393,7 @@ def _find_entities(text: str):
             continue
         seen.add(name)
         entity_type = _classify_entity(name, text, s)
-        if entity_type == 'concept' and not (name.lower()) in _TECH_NAMES:
+        if entity_type == 'concept' and name.lower() not in _TECH_NAMES:
             entity_type = 'org'
         entities.append({'name': name, 'type': entity_type, 'start': s, 'end': e})
 
@@ -666,7 +666,6 @@ class AaakDialect:
 
     def decode(self, dialect_text: str) -> dict:
         """Parse an AAAK Dialect string back into a readable summary."""
-        import json as _json
         text_lines = dialect_text.strip().split('\n')
         result = {'header': {}, 'zettels': []}
 

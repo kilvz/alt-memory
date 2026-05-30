@@ -14,7 +14,6 @@ import hashlib
 import json
 import logging
 import os
-import sqlite3
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -22,7 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from alt_memory.normalize import normalize
-from alt_memory.dimension import Dimension, SKIP_DIRS, mine_lock, mine_dimension_lock, MineAlreadyRunning, ENTITY_UPSERT_BATCH_SIZE, DEFAULT_MAX_FILE_SIZE as MAX_FILE_SIZE
+from alt_memory.dimension import Dimension, SKIP_DIRS, mine_lock, mine_dimension_lock, ENTITY_UPSERT_BATCH_SIZE, DEFAULT_MAX_FILE_SIZE as MAX_FILE_SIZE
 from alt_memory.config import DEFAULT_CHUNK_SIZE as CHUNK_SIZE
 
 logger = logging.getLogger("alt_memory")

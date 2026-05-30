@@ -7,7 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Optional, TypedDict
 
-from alt_memory.dimension import Dimension, get_nodes_collection, purge_file_nodes
+from alt_memory.dimension import Dimension
 
 logger = logging.getLogger(__name__)
 _BATCH = 1000

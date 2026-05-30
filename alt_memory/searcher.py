@@ -7,7 +7,6 @@ This module provides pure-function helpers for re-ranking and display.
 import logging
 import math
 import re
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -195,7 +194,7 @@ def expand_with_neighbors(
     Returns a dict with ``text`` (combined chunks), ``entity_index``, and
     ``total_entities`` for the source file.
     """
-    rid, content, meta_json = row[0], row[3] if len(row) > 3 else "", row[4] if len(row) > 4 else "{}"
+    content, meta_json = row[0], row[3] if len(row) > 3 else "", row[4] if len(row) > 4 else "{}"
     try:
         meta = __import__("json").loads(meta_json) if isinstance(meta_json, str) else meta_json
     except Exception:

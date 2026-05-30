@@ -2,12 +2,11 @@
 
 import json
 import logging
-import pickle
 import re
 import string
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 from scipy.sparse import csr_array
@@ -585,8 +584,8 @@ class OnnxEmbedder:
             )
 
     def _load_direct_onnx(
-        self, model_id: str, ort: "Any", np: "Any"
-    ) -> "Any":
+        self, model_id: str, ort: Any, np: Any
+    ) -> Any:
         """Attempt to load a pre-exported ONNX model from HuggingFace hub.
 
         Falls back to onnx subfolder if available.

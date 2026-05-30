@@ -2,12 +2,14 @@
 
 import json
 import logging
-import re
 import urllib.error
 import urllib.parse
 import urllib.request
 from difflib import SequenceMatcher
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from alt_memory.dimension import Dimension
 
 from alt_memory.backends.knowledge_graph import KnowledgeGraph
 from alt_memory.entity_detector import EntityDetector

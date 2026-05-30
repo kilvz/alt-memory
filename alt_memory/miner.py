@@ -1,13 +1,11 @@
 """File mining pipeline for Alt Memory — mines files into dimension entities with entity extraction, dedup, and compression."""
 
 import ast
-import contextlib
 import hashlib
 import json
 import logging
 import os
 import re
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional

@@ -76,6 +76,7 @@ def _load_gi_matcher(directory: Path, cache: dict):
         cache[cache_key] = None
         return None
     except Exception:
+        logger.debug("sync gitignore spec load failed", exc_info=True)
         cache[cache_key] = None
         return None
 

@@ -13,16 +13,14 @@ Preserves:
 Corrects:
   - Genuine typos in lowercase, flowing text
   - Common fat-finger words (3am → 3am, knoe → know)
-
-Usage:
-    from alt_memory.spellcheck import spellcheck_user_text
-    corrected = spellcheck_user_text("lsresdy knoe the question befor")
-    # → "already know the question before"  (best effort)
 """
 
+import logging
 import re
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # Lazy-load autocorrect — not everyone has it installed
 _speller = None
@@ -125,6 +123,7 @@ def _load_known_names() -> set:
                 names.add(alias.lower())
         return names
     except Exception:
+        logger.debug("spellcheck entity names read failed", exc_info=True)
         return set()
 
 

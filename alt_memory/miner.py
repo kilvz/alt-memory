@@ -197,6 +197,7 @@ class GitignoreMatcher:
                 try:
                     content = gitignore.read_text(encoding="utf-8", errors="replace")
                 except Exception:
+                    logger.debug("failed to read .gitignore %s", gitignore, exc_info=True)
                     continue
                 dir_prefix = str(gitignore.parent.relative_to(self.root_dir).as_posix())
                 for raw in content.splitlines():
@@ -258,6 +259,7 @@ def _read_file_preview(filepath: str, max_chars: int = 2000) -> str:
         with open(filepath, "r", encoding="utf-8", errors="replace") as f:
             full = f.read()
     except Exception:
+        logger.debug("failed to read file %s", filepath, exc_info=True)
         return ""
     _FILE_CONTENT_CACHE[filepath] = full
     return full[:max_chars]
@@ -500,6 +502,7 @@ def _add_chunk(
     try:
         dup = dim.check_duplicate(content, threshold=0.85)
     except Exception:
+        logger.debug("check_duplicate failed", exc_info=True)
         return None
     if dup:
         return None
@@ -728,6 +731,7 @@ def _try_frontmatter_date(content: str) -> Optional[str]:
         import yaml
         data = yaml.safe_load(frontmatter_text)
     except Exception:
+        logger.debug("_try_frontmatter_date yaml parse failed", exc_info=True)
         return None
     if not isinstance(data, dict):
         return None
@@ -744,6 +748,7 @@ def _try_frontmatter_date(content: str) -> Optional[str]:
         except ImportError:
             continue
         except Exception:
+            logger.debug("_try_frontmatter_date markdown parse failed", exc_info=True)
             continue
     return None
 

@@ -460,6 +460,7 @@ def _ingest_transcript(transcript_path: str):
     try:
         AltMemoryConfig()
     except Exception:
+        logger.debug("AltMemoryConfig init failed, skipping transcript ingest", exc_info=True)
         return
     try:
         _spawn_mine([_alt_memory_python(), "-m", "alt_memory", "mine", str(path.parent), "--mode", "convos", "--realm", "sessions"])
@@ -592,6 +593,7 @@ def hook_stop(data: dict, harness: str):
             silent = config.hook_silent_save
             toast = config.hook_desktop_toast
         except Exception:
+            logger.debug("AltMemoryConfig init failed, using defaults", exc_info=True)
             silent = True
             toast = False
 

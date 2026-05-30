@@ -64,6 +64,7 @@ def _get_dimension(config=None):
         dimension.init()
         return dimension
     except Exception:
+        logger.debug("_get_dimension failed", exc_info=True)
         return None
 
 

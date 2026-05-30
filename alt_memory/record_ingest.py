@@ -102,6 +102,7 @@ def ingest_records(
         try:
             state = json.loads(state_file.read_text())
         except Exception:
+            logger.debug("failed to read state file, starting fresh", exc_info=True)
             state = {}
 
     dim = Dimension(dim_path)

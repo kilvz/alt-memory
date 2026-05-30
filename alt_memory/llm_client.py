@@ -12,12 +12,15 @@ All use stdlib ``urllib`` — no external SDKs.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
 
 
 _LOCALHOST_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -121,7 +124,7 @@ def _http_post_json(url: str, body: dict, headers: dict, timeout: int) -> dict:
         try:
             detail = e.read().decode("utf-8", errors="replace")[:500]
         except Exception:
-            pass
+            logger.debug("failed to read HTTP error detail", exc_info=True)
         raise LLMError(f"HTTP {e.code} from {url}: {detail or e.reason}") from e
     except (URLError, OSError) as e:
         raise LLMError(f"Cannot reach {url}: {e}") from e

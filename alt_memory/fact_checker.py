@@ -46,6 +46,7 @@ def _load_entity_names(dim_path: str = None) -> set:
         kg.close()
         return names
     except Exception:
+        logger.debug("get_unique_names failed", exc_info=True)
         return set()
 
 
@@ -131,6 +132,7 @@ def _check_kg_contradictions(text: str, dim_path: str) -> list:
         from alt_memory.backends.knowledge_graph import KnowledgeGraph
         kg = KnowledgeGraph(path=dim_path)
     except Exception:
+        logger.debug("KnowledgeGraph init failed, no fact check", exc_info=True)
         return []
 
     issues: list = []

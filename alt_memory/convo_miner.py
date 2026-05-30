@@ -184,6 +184,7 @@ def file_already_mined(
             return abs(float(stored_mtime) - current_mtime) < 0.001
         return True
     except Exception:
+        logger.debug("_mtime_changed failed for %s", source_file, exc_info=True)
         return False
 
 

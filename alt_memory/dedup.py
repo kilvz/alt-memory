@@ -20,6 +20,7 @@ def _get_dimension_path():
         from alt_memory.config import AltMemoryConfig
         return AltMemoryConfig().dim_path
     except Exception:
+        logger.debug("_get_dimension_path fallback to default", exc_info=True)
         return os.path.join(os.path.expanduser("~"), ".alt-memory")
 
 
@@ -86,6 +87,7 @@ def dedup_source_group(dimension, entity_ids, threshold=DEFAULT_THRESHOLD, dry_r
             else:
                 kept.append((eid, doc["content"]))
         except Exception:
+            logger.debug("dedup check failed for entity, keeping", exc_info=True)
             kept.append((eid, doc["content"]))
 
     if to_delete and not dry_run:

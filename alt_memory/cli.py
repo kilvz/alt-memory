@@ -9,6 +9,7 @@ from pathlib import Path
 from alt_memory.dimension import Dimension
 
 logging.basicConfig(level=logging.WARNING, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 
 def main():
@@ -215,7 +216,7 @@ def main():
                             platform = origin.primary_platform or "AI dialogue"
                             print(f"  Corpus origin: {platform}")
                 except Exception:
-                    pass
+                    logger.debug("corpus origin detect failed", exc_info=True)
 
                 try:
                     from alt_memory.project_scanner import discover_entities
@@ -224,13 +225,13 @@ def main():
                     if total > 0:
                         print(f"  Entities found: {total}")
                 except Exception:
-                    pass
+                    logger.debug("entity discovery failed", exc_info=True)
 
                 try:
                     from alt_memory.domain_detector_local import detect_domains_local
                     detect_domains_local(project_dir=project_dir, yes=True)
                 except Exception:
-                    pass
+                    logger.debug("domain detection failed", exc_info=True)
 
             print(f"Dimension initialized at {dim_path}")
 

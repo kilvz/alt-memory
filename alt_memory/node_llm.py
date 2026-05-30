@@ -5,6 +5,7 @@ Optional and opt-in. Uses any OpenAI-compatible /chat/completions endpoint.
 """
 
 import json
+import logging
 import os
 import re
 import time
@@ -22,6 +23,8 @@ from alt_memory.dimension import (
     purge_file_nodes,
     upsert_node_lines,
 )
+
+logger = logging.getLogger(__name__)
 
 MAX_CONTENT_CHARS = 30000
 MAX_OUTPUT_TOKENS = 1500
@@ -90,6 +93,7 @@ def _call_llm(cfg: LLMConfig, source_file: str, realm: str, domain: str, content
 
         lang_instruction = t("aaak.instruction")
     except Exception:
+        logger.debug("i18n init failed, using empty lang instruction", exc_info=True)
         lang_instruction = ""
 
     prompt = PROMPT_TEMPLATE.format(

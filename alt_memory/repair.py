@@ -104,7 +104,7 @@ def status(dim_path: Optional[str] = None) -> dict:
                 cfg = json.load(f)
             backend = cfg.get("backend", "faiss")
         except Exception:
-            pass
+            logger.debug("repair status config read failed", exc_info=True)
     result["backend"] = backend
 
     store = None
@@ -132,7 +132,7 @@ def status(dim_path: Optional[str] = None) -> dict:
             try:
                 store.close()
             except Exception:
-                pass
+                logger.debug("store close failed in repair status", exc_info=True)
         result["message"] = f"{backend.upper()} error: {e}"
         return result
 
@@ -186,7 +186,7 @@ def scan_dimension(dim_path: Optional[str] = None) -> tuple[set[str], set[str]]:
                 cfg = json.load(f)
             backend = cfg.get("backend", "faiss")
         except Exception:
-            pass
+            logger.debug("repair scan config read failed", exc_info=True)
 
     vector_ids: set[str] = set()
     print(f"\n  Probing {backend.upper()} store (batches of 100)...")
@@ -211,7 +211,7 @@ def scan_dimension(dim_path: Optional[str] = None) -> tuple[set[str], set[str]]:
                             if ids:
                                 vector_ids.add(sid)
                         except Exception:
-                            pass
+                            logger.debug("fallback single get failed for %s", sid, exc_info=True)
         finally:
             store.close()
     else:
@@ -236,7 +236,7 @@ def scan_dimension(dim_path: Optional[str] = None) -> tuple[set[str], set[str]]:
                             if row:
                                 vector_ids.add(sid)
                         except Exception:
-                            pass
+                            logger.debug("fallback single query failed for %s", sid, exc_info=True)
         finally:
             meta.close()
 
@@ -297,7 +297,7 @@ def prune_corrupt(dim_path: Optional[str] = None, confirm: bool = False) -> None
                 cfg = json.load(f)
             backend = cfg.get("backend", "faiss")
         except Exception:
-            pass
+            logger.debug("repair rebuild config read failed", exc_info=True)
 
     if backend == "chroma":
         from alt_memory.backends.chroma_store import ChromaStore

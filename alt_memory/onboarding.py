@@ -10,11 +10,14 @@ Seeds the entity registry with confirmed data so Alt Memory knows your world
 from minute one — before a single session is indexed.
 """
 
+import logging
 from pathlib import Path
 
 from alt_memory.entity_detector import EntityDetector
 from alt_memory.backends.knowledge_graph import KnowledgeGraph
 from alt_memory.dimension import SKIP_DIRS
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_REALMS = {
     "work": ["projects", "clients", "team", "decisions", "research"],
@@ -191,6 +194,7 @@ def _scan_for_detection(directory: str) -> list:
             try:
                 texts.append(fp.read_text(encoding="utf-8", errors="replace"))
             except Exception:
+                logger.debug("failed to read file %s", fp, exc_info=True)
                 continue
     return texts
 
@@ -218,6 +222,7 @@ def _auto_detect(directory: str, known_people: list, detector: EntityDetector) -
                 new_people.append(e)
         return new_people
     except Exception:
+        logger.debug("_auto_detect failed", exc_info=True)
         return []
 
 

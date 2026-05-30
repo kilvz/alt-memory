@@ -425,5 +425,6 @@ class MemoryStack:
             s = dim.status()
             result["total_entities"] = s.get("entities", 0)
         except Exception:
+            logger.debug("layers status read failed", exc_info=True)
             result["total_entities"] = 0
         return result

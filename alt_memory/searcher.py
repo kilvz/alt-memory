@@ -199,6 +199,7 @@ def expand_with_neighbors(
         meta = __import__("json").loads(meta_json) if isinstance(meta_json, str) else meta_json
     except Exception:
         meta = {}
+        logger.debug("_expand_entity meta parse failed", exc_info=True)
     src = meta.get("source_file")
     chunk_idx = meta.get("chunk_index")
     if not src or not isinstance(chunk_idx, int):
@@ -212,6 +213,7 @@ def expand_with_neighbors(
         )
         all_docs = cursor.fetchall()
     except Exception:
+        logger.debug("_expand_entity db query failed", exc_info=True)
         return {"text": content, "entity_index": chunk_idx, "total_entities": None}
 
     indexed = []
@@ -219,6 +221,7 @@ def expand_with_neighbors(
         try:
             m = __import__("json").loads(d[4]) if isinstance(d[4], str) else d[4]
         except Exception:
+            logger.debug("_expand_entity doc meta parse failed", exc_info=True)
             m = {}
         ci = m.get("chunk_index")
         if isinstance(ci, int) and ci in target_indexes:

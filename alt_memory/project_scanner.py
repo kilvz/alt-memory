@@ -8,6 +8,7 @@ contributors. Pure local, no API.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Optional
 
 from alt_memory.dimension import SKIP_DIRS
+
+logger = logging.getLogger(__name__)
 
 MAX_DEPTH = 6
 MAX_COMMITS_PER_REPO = 1000
@@ -102,6 +105,7 @@ def _parse_pyproject(path: Path) -> Optional[str]:
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
     except Exception:
+        logger.debug("_parse_pyproject toml failed", exc_info=True)
         return None
     name = data.get("project", {}).get("name")
     if isinstance(name, str) and name:
@@ -121,6 +125,7 @@ def _parse_cargo(path: Path) -> Optional[str]:
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8", errors="replace"))
     except Exception:
+        logger.debug("_parse_cargo toml failed", exc_info=True)
         return None
     name = data.get("package", {}).get("name")
     return name if isinstance(name, str) and name else None

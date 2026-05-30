@@ -122,7 +122,7 @@ def _close_wal() -> None:
             try:
                 _WAL_HANDLE.close()
             except Exception:
-                pass
+                logger.debug("WAL close error", exc_info=True)
             _WAL_HANDLE = None
 
 

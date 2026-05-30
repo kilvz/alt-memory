@@ -597,6 +597,7 @@ class OnnxEmbedder:
                 model_id, subfolder="onnx", filename="model.onnx"
             )
         except Exception:
+            logger.debug("ONNX subfolder fallback for %s", model_id, exc_info=True)
             model_path = hf_hub_download(
                 model_id.replace("sentence-transformers/", "")
                 + "-ONNX",

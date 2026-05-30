@@ -1249,6 +1249,7 @@ class Dimension:
         try:
             count = self._db_execute("SELECT COUNT(*) FROM entities").fetchone()[0]
         except Exception:
+            logger.debug("entity count query failed", exc_info=True)
             result["status"] = "unreadable"
             result["message"] = "dimension.db exists but is unreadable"
             result["action"] = "Check file permissions or run repair"

@@ -8,3 +8,5 @@ build/
 *.md
 !README.md
 AGENTS.md
+benchmarks/results_*
+benchmarks/quick_matrix.py

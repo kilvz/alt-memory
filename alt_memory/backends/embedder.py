@@ -650,16 +650,16 @@ class EmbeddinggemmaONNX:
         if not texts:
             return np.zeros((0, _EMBEDDINGGEMMA_DIM), dtype=np.float32)
         self._lazy_load()
-        np = self._np
+        np_ = self._np
         prefixed = [_EMBEDDINGGEMMA_PREFIX + t for t in texts]
         encs = self._tokenizer.encode_batch(prefixed)
-        input_ids = np.asarray([e.ids for e in encs], dtype=np.int64)
-        attention_mask = np.asarray([e.attention_mask for e in encs], dtype=np.int64)
+        input_ids = np_.asarray([e.ids for e in encs], dtype=np.int64)
+        attention_mask = np_.asarray([e.attention_mask for e in encs], dtype=np.int64)
         outputs = self._session.run(
             None, {"input_ids": input_ids, "attention_mask": attention_mask}
         )
         sent_emb = outputs[self._output_idx][:, :_EMBEDDINGGEMMA_DIM]
-        norms = np.linalg.norm(sent_emb, axis=1, keepdims=True) + 1e-12
+        norms = np_.linalg.norm(sent_emb, axis=1, keepdims=True) + 1e-12
         return (sent_emb / norms).astype(np.float32)
 
     def _lazy_load(self) -> None:

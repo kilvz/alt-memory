@@ -14,6 +14,7 @@ import threading
 import time
 import traceback
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 try:
@@ -1467,7 +1468,7 @@ class MCPServer:
                 silent_save=params.get("silent_save"),
                 desktop_toast=params.get("desktop_toast"),
             )
-        return config.get_hook_settings()
+        return _MCP_CONFIG.get_hook_settings()
 
     def _get_backend(self, params: dict) -> dict:
         return {"backend": getattr(self.dim, "_backend", "faiss")}

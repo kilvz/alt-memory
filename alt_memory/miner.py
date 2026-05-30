@@ -30,6 +30,84 @@ logger = logging.getLogger(__name__)
 MAX_CHUNKS_PER_FILE = 50_000
 
 
+def load_config(project_dir: str) -> dict:
+    """Load .alt-memory.yaml from project directory.
+
+    Returns dict with ``realm`` and ``domains`` list, or a fallback
+    using the directory basename as realm and a single ``general`` domain.
+    """
+    resolved = Path(project_dir).expanduser().resolve()
+    config_path = resolved / ".alt-memory.yaml"
+    if not config_path.exists():
+        realm_name = resolved.name.lower().replace(" ", "_").replace("-", "_")
+        return {
+            "realm": realm_name,
+            "domains": [{"name": "general", "description": "All project files", "keywords": ["general"]}],
+        }
+    try:
+        import yaml
+        with open(config_path, "r") as f:
+            return yaml.safe_load(f)
+    except Exception as exc:
+        logger.warning("Failed to load %s: %s — using fallback", config_path, exc)
+        return {
+            "realm": resolved.name.lower().replace(" ", "_").replace("-", "_"),
+            "domains": [{"name": "general", "description": "All project files", "keywords": ["general"]}],
+        }
+
+
+def detect_domain(filepath: str, content: str, domains: list[dict], project_path: str) -> str:
+    """Route a file to the best domain.
+
+    Priority:
+    1. Relative folder path matches a domain name or keyword
+    2. Filename matches a domain name or keyword
+    3. Content keyword scoring against domain keywords
+    4. Fallback: ``general``
+    """
+    try:
+        rel = Path(filepath).relative_to(Path(project_path).resolve())
+        rel_str = rel.as_posix().lower()
+    except ValueError:
+        rel_str = Path(filepath).name.lower()
+
+    # Priority 1: folder path match
+    for d in domains:
+        name = d["name"].lower()
+        keywords = [k.lower() for k in d.get("keywords", [name])]
+        for seg in rel_str.split("/"):
+            if seg in keywords or seg == name:
+                return d["name"]
+
+    # Priority 2: filename match
+    stem = Path(filepath).stem.lower()
+    for d in domains:
+        name = d["name"].lower()
+        keywords = [k.lower() for k in d.get("keywords", [name])]
+        if stem in keywords or stem == name:
+            return d["name"]
+
+    # Priority 3: content keyword scoring
+    if content and domains:
+        text_lower = content[:2000].lower()
+        best_score = -1
+        best_domain = domains[0]["name"]
+        for d in domains:
+            keywords = [k.lower() for k in d.get("keywords", [d["name"]])]
+            score = sum(text_lower.count(kw) for kw in keywords)
+            if score > best_score:
+                best_score = score
+                best_domain = d["name"]
+        if best_score > 0:
+            return best_domain
+
+    # Priority 4: fallback
+    for d in domains:
+        if d["name"].lower() == "general":
+            return d["name"]
+    return domains[0]["name"] if domains else "general"
+
+
 def resolve_max_chunks_per_file(cli_value: Optional[int] = None) -> int:
     if cli_value is not None:
         if cli_value <= 0:
@@ -83,31 +161,10 @@ def _extract_entities_for_metadata(
 
     Returns a list of dicts, each with keys: ``name``, ``type``, ``count``.
     """
-    from alt_memory.entity_detector import _get_coca_filter, _apply_known_systems_prepass
-    from alt_memory.i18n import get_entity_patterns
+    from alt_memory.entity_detector import _extract_candidate_words
 
-    coca = _get_coca_filter()
-    ep = get_entity_patterns()
-    stopwords = frozenset(w.lower() for w in ep.get("stopwords", []))
+    counter = _extract_candidate_words(text, min_len=2)
     known = _load_known_entities(dim)
-
-    cleaned, sys_counts = _apply_known_systems_prepass(text)
-
-    counter: dict[str, int] = {}
-    for name, count in sys_counts.items():
-        if name not in _ENTITY_STOPLIST and name.lower() not in stopwords and name.lower() not in coca:
-            counter[name] = counter.get(name, 0) + count
-
-    for m in re.finditer(r"\b[A-Z][a-zA-Z'\-]{2,50}\b", cleaned):
-        word = m.group()
-        low = word.lower()
-        if word in _ENTITY_STOPLIST:
-            continue
-        if low in stopwords:
-            continue
-        if low in coca:
-            continue
-        counter[word] = counter.get(word, 0) + 1
 
     sorted_entities = sorted(counter.items(), key=lambda x: -x[1])
     result: list[dict] = []
@@ -181,6 +238,15 @@ def load_gitignore_matcher(root_dir: str) -> Optional[GitignoreMatcher]:
 
 def should_skip_dir(dirname: str) -> bool:
     return dirname in SKIP_DIRS or dirname.endswith(".egg-info")
+
+
+def _read_file_preview(filepath: str, max_chars: int = 2000) -> str:
+    """Read first ``max_chars`` of a text file for content-based routing."""
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+            return f.read(max_chars)
+    except Exception:
+        return ""
 
 
 def is_gitignored(rel_path: str, matchers: list, is_dir: bool = False) -> bool:
@@ -941,18 +1007,33 @@ def batch_mine(
     if file_limit is not None and file_limit > 0:
         unique = unique[:file_limit]
 
+    # Load per-project .alt-memory.yaml config for domain routing
+    config = load_config(str(base))
+    config_domains: Optional[list[dict]] = None
+    if realm == "files" or realm == config.get("realm", ""):
+        config_domains = config.get("domains", [])
+    elif config.get("realm") and realm != config["realm"]:
+        logger.debug(
+            "batch_mine realm=%s differs from config realm=%s; skipping config-based routing",
+            realm, config["realm"],
+        )
+
     total_created = 0
 
     with mine_dimension_lock(dim_path):
         _write_mine_pid_file(dim_path)
         try:
             for fpath in unique:
-                try:
-                    domain = fpath.parent.relative_to(base).as_posix()
-                    if domain == ".":
+                if config_domains:
+                    content = _read_file_preview(str(fpath))
+                    domain = detect_domain(str(fpath), content, config_domains, str(base))
+                else:
+                    try:
+                        domain = fpath.parent.relative_to(base).as_posix()
+                        if domain == ".":
+                            domain = "root"
+                    except ValueError:
                         domain = "root"
-                except ValueError:
-                    domain = "root"
 
                 n = mine_file_into_dimension(
                     dim, str(fpath), realm=realm, domain=domain,
@@ -963,6 +1044,16 @@ def batch_mine(
             tunnels = _compute_topic_tunnels_for_wing(realm, dim)
             if tunnels:
                 logger.info("Post-mine: created %d topic tunnel(s) for realm %s", tunnels, realm)
+
+            from alt_memory.gateways import compute_gateways_for_realm
+            from alt_memory.dim_graph import entity_tunnels_for_realm
+
+            gws = compute_gateways_for_realm(realm, dim_path=str(dim._base))
+            if gws:
+                logger.info("Post-mine: computed %d gateway(s) for realm %s", len(gws), realm)
+                et = entity_tunnels_for_realm(realm, gws, dimension=dim)
+                if et:
+                    logger.info("Post-mine: created %d entity tunnel(s) for realm %s", len(et), realm)
 
         finally:
             _cleanup_mine_pid_file(dim_path)

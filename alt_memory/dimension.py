@@ -28,25 +28,58 @@ NODE_CHAR_LIMIT = 2000
 NODE_EXTRACT_WINDOW = 5000
 
 # Files/dirs to skip during directory walks
-SKIP_DIRS = frozenset({".git", "__pycache__", "node_modules", ".venv", "venv", ".opencode", ".claude"})
+SKIP_DIRS = frozenset({
+    ".git", "__pycache__", "node_modules", ".venv", "venv", "env",
+    "dist", "build", ".next", "coverage", ".ruff_cache", ".mypy_cache",
+    ".pytest_cache", ".cache", ".tox", ".nox", ".idea", ".vscode",
+    ".ipynb_checkpoints", ".eggs", "htmlcov", "target", ".terraform",
+    "vendor", ".opencode", ".claude", ".alt-memory",
+})
 
 # Common capitalized words that look like proper nouns but are usually
 # sentence-starters or filler. Filtered out of entity extraction.
 _ENTITY_STOPLIST = frozenset(
     {
         "The", "This", "That", "These", "Those",
+        "I", "You", "He", "She", "It", "We", "They",
+        "My", "Your", "His", "Her", "Its", "Our", "Their",
+        "Mine", "Yours", "Hers", "Ours", "Theirs",
+        "A", "An",
         "When", "Where", "What", "Why", "Who", "Which", "How",
         "After", "Before", "Then", "Now", "Here", "There",
-        "And", "But", "Or", "Yet", "So", "If", "Else",
-        "Yes", "No", "Maybe", "Okay",
-        "User", "Assistant", "System", "Tool",
+        "And", "But", "Or", "Yet", "So", "If", "Else", "For", "Nor",
+        "Yes", "No", "Maybe", "Okay", "Not", "None", "Nothing",
+        "User", "Assistant", "System", "Tool", "Human", "Bot",
+        "All", "Each", "Every", "Both", "Few", "Many", "Much",
+        "Some", "Any",
+        "Only", "Just", "Also", "Very", "Too",
+        "Please", "Hello", "Hi", "Hey", "Goodbye", "Bye", "Thanks", "Thank", "Sorry",
+        "Note", "Warning", "Error", "Info", "Debug",
+        "Todo", "FIXME", "HACK", "XXX",
+        "True", "False", "Null", "NaN",
+        "Type", "Value", "Key", "Name", "File", "Line",
+        "Up", "Down", "Left", "Right", "On", "Off",
+        "First", "Second", "Third", "Last", "Next", "Previous",
+        "Top", "Bottom", "Middle", "Center",
+        "New", "Old", "Good", "Bad", "Great", "Little",
+        "Big", "Large", "Small", "High", "Low", "Long", "Short",
+        "Once", "Twice", "Often", "Always", "Never", "Sometimes",
+        "Yesterday", "Today", "Tomorrow",
         "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
         "January", "February", "March", "April", "May", "June",
         "July", "August", "September", "October", "November", "December",
+        "Dr", "Prof", "Mr", "Ms", "Mrs", "Sir", "Lady", "Lord",
+        "Capt", "Sgt", "Rep", "Sen", "Gov", "Pres", "VP",
+        "Using", "Building", "Creating", "Working", "Running", "Testing",
+        "Developing", "Deploying", "Installing", "Configuring", "Setting",
+        "Getting", "Putting", "Making", "Doing", "Going", "Taking",
+        "Adding", "Removing", "Updating", "Fixing", "Starting", "Stopping",
     }
 )
 
 _STORE_BACKUP_FILES = ["index.faiss", "metadata.db", "seq.txt", "chroma.sqlite3"]
+ENTITY_UPSERT_BATCH_SIZE = 1000
+DEFAULT_MAX_FILE_SIZE = 500 * 1024 * 1024
 
 
 class MineAlreadyRunning(RuntimeError):
@@ -412,6 +445,8 @@ class Dimension:
                 source_file TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (realm, domain) REFERENCES domains(realm, name))""")
         self._db.execute("CREATE INDEX IF NOT EXISTS idx_entities_realm_domain ON entities(realm, domain)")
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_entities_source ON entities(source_file)")
+        self._db.execute("CREATE INDEX IF NOT EXISTS idx_entities_created_at ON entities(created_at)")
         self._db.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(content, id)")
         self._db.execute("""CREATE TABLE IF NOT EXISTS nodes (
@@ -653,6 +688,74 @@ class Dimension:
         logger.debug("Added entity %s in %s/%s", entity_id, realm, domain)
         return entity_id
 
+    def batch_add_entities(
+        self,
+        entities: list[tuple[str, str, str, dict, str, Optional[str]]],
+    ) -> list[str]:
+        """Add multiple entities in a single transaction.
+
+        Each tuple is ``(realm, domain, content, metadata, source_file, entity_id)``.
+        If ``entity_id`` is None, one is auto-generated.
+
+        Returns list of entity IDs in the same order as input.
+        """
+        if not entities:
+            return []
+
+        realms = set()
+        ids: list[str] = []
+        texts: list[str] = []
+        all_metas: list[dict] = []
+        sql_rows: list[tuple] = []
+        fts_rows: list[tuple] = []
+
+        for i, (realm, domain, content, metadata, source_file, entity_id) in enumerate(entities):
+            if not content.strip():
+                continue
+            realm = _sanitize(realm, "realm")
+            domain = _sanitize(domain, "domain")
+            realms.add((realm, domain))
+            if entity_id is None:
+                entity_id = self._store.next_id()
+            meta = dict(metadata or {})
+            meta["realm"] = realm
+            meta["domain"] = domain
+            if source_file is not None:
+                meta["source_file"] = source_file
+            ids.append(entity_id)
+            texts.append(content)
+            all_metas.append(meta)
+            sql_rows.append((entity_id, realm, domain, content, json.dumps(meta), source_file))
+            fts_rows.append((entity_id, content))
+
+        if not ids:
+            return []
+
+        for realm, domain in realms:
+            self.get_or_create_domain(realm, domain)
+
+        embeddings = self._embedder.embed(texts)
+        embeddings_2d = embeddings.reshape(len(texts), -1) if embeddings.ndim == 1 else embeddings
+
+        with self._lock:
+            self._store.add(ids=ids, texts=texts, metadatas=all_metas, embeddings=embeddings_2d)
+            self._db.executemany(
+                "INSERT OR REPLACE INTO entities (id, realm, domain, content, metadata, source_file) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                sql_rows,
+            )
+            self._db.executemany("DELETE FROM entities_fts WHERE id = ?",
+                                 [(eid,) for eid, _ in fts_rows])
+            self._db.executemany(
+                "INSERT INTO entities_fts (id, content) VALUES (?, ?)",
+                fts_rows,
+            )
+            self._db.commit()
+
+        self._save_embedder()
+        logger.debug("batch_add_entities: added %d entities", len(ids))
+        return ids
+
     def get_entity(self, entity_id: str) -> Optional[dict]:
         row = self._db_execute(
             "SELECT id, realm, domain, content, metadata, source_file, created_at "
@@ -695,6 +798,18 @@ class Dimension:
             self._db.execute("DELETE FROM entities_fts WHERE id = ?", (entity_id,))
             self._db.commit()
         return True
+
+    def delete_entities(self, entity_ids: list[str]) -> int:
+        if not entity_ids:
+            return 0
+        with self._lock:
+            if self._store:
+                self._store.delete(ids=entity_ids)
+            placeholders = ",".join("?" * len(entity_ids))
+            self._db.execute(f"DELETE FROM entities WHERE id IN ({placeholders})", entity_ids)
+            self._db.execute(f"DELETE FROM entities_fts WHERE id IN ({placeholders})", entity_ids)
+            self._db.commit()
+        return len(entity_ids)
 
     def update_entity(self, entity_id: str, content: Optional[str] = None,
                       metadata: Optional[dict] = None,
@@ -776,8 +891,9 @@ class Dimension:
 
         validate_candidate_strategy(candidate_strategy)
 
-        if vector_disabled:
-            kw = self._keyword_search(query, n_results, realm, domain)
+        mode = "keyword" if vector_disabled else "hybrid"
+        sr = self.search(query, n_results, realm, domain, mode=mode)
+        if vector_disabled or not self._store or self._store.count() == 0:
             return {
                 "query": query,
                 "filters": {"realm": realm, "domain": domain},
@@ -785,32 +901,14 @@ class Dimension:
                     {
                         "id": r.id,
                         "text": r.text,
-                        "distance": None,
+                        "distance": None if vector_disabled else r.distance,
                         "metadata": r.metadata,
                         "realm": r.realm,
                         "domain": r.domain,
                     }
-                    for r in kw
+                    for r in sr
                 ],
-                "fallback": "keyword_only",
-            }
-
-        if not self._store or self._store.count() == 0:
-            kw = self._keyword_search(query, n_results, realm, domain)
-            return {
-                "query": query,
-                "filters": {"realm": realm, "domain": domain},
-                "results": [
-                    {
-                        "id": r.id,
-                        "text": r.text,
-                        "distance": r.distance,
-                        "metadata": r.metadata,
-                        "realm": r.realm,
-                        "domain": r.domain,
-                    }
-                    for r in kw
-                ],
+                **({"fallback": "keyword_only"} if vector_disabled else {}),
             }
 
         # Over-fetch for re-ranking
@@ -1104,9 +1202,8 @@ class Dimension:
         with self._lock:
             self._db.execute("DELETE FROM entities_fts")
             rows = self._db.execute("SELECT id, content FROM entities").fetchall()
-            for rid, content in rows:
-                self._db.execute("INSERT INTO entities_fts (id, content) VALUES (?, ?)",
-                                 (rid, content))
+            self._db.executemany("INSERT INTO entities_fts (id, content) VALUES (?, ?)",
+                                 rows)
             self._db.commit()
         logger.info("Rebuilt FTS index with %d entities", len(rows))
 
@@ -1378,33 +1475,8 @@ class Dimension:
 
 
 def _candidate_entity_words(text: str) -> list[str]:
-    from alt_memory.entity_detector import _get_coca_filter
-    from alt_memory.i18n import get_entity_patterns
-    from alt_memory.entity_detector import _apply_known_systems_prepass
-
-    coca = _get_coca_filter()
-    ep = get_entity_patterns()
-    stopwords = frozenset(w.lower() for w in ep.get("stopwords", []))
-
-    # Apply known-systems prepass — replaces recognized system names with spaces
-    # so they won't be picked up again as generic entities.
-    cleaned, _ = _apply_known_systems_prepass(text)
-
-    result: list[str] = []
-    seen: set[str] = set()
-    for m in re.finditer(r"\b[A-Z][a-zA-Z'\-]{1,50}\b", cleaned):
-        word = m.group()
-        low = word.lower()
-        if word in _ENTITY_STOPLIST:
-            continue
-        if low in stopwords:
-            continue
-        if low in coca:
-            continue
-        if word in seen:
-            continue
-        seen.add(word)
-        result.append(word)
+    from alt_memory.entity_detector import _extract_candidate_words
+    result = _extract_candidate_words(text, min_len=1, deduplicate=True)
     return result
 
 

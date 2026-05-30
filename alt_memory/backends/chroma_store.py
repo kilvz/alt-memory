@@ -14,9 +14,9 @@ from typing import Optional
 
 import numpy as np
 
-logger = logging.getLogger(__name__)
+from alt_memory.backends.base import DEFAULT_DIM
 
-_DEFAULT_DIM = 384
+logger = logging.getLogger(__name__)
 
 
 def _l2_normalize(embeddings: np.ndarray) -> np.ndarray:
@@ -41,7 +41,7 @@ def _sanitize_metadatas(metadatas: Optional[list[Optional[dict]]]) -> Optional[l
 class ChromaStore:
     """Persistent vector store backed by ChromaDB — FaissStore-compatible interface."""
 
-    def __init__(self, path: str, dimension: int = _DEFAULT_DIM):
+    def __init__(self, path: str, dimension: int = DEFAULT_DIM):
         self._store_path = path
         self._path = pathlib.Path(path)
         self._path.mkdir(parents=True, exist_ok=True)

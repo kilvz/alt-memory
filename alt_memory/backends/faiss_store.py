@@ -24,13 +24,13 @@ def _sql_val(v):
     return str(v)
 
 
-_DEFAULT_DIM = 384
+from alt_memory.backends.base import DEFAULT_DIM
 
 
 class FaissStore:
     """Persistent vector store backed by FAISS + SQLite."""
 
-    def __init__(self, path: str, dimension: int = _DEFAULT_DIM):
+    def __init__(self, path: str, dimension: int = DEFAULT_DIM):
         self.path = Path(path)
         self.path.mkdir(parents=True, exist_ok=True)
         self.dimension = dimension

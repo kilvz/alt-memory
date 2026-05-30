@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Optional
 
 from alt_memory.normalize import normalize
-from alt_memory.dimension import Dimension, mine_lock, mine_dimension_lock, MineAlreadyRunning
+from alt_memory.dimension import Dimension, SKIP_DIRS, mine_lock, mine_dimension_lock, MineAlreadyRunning
 
 logger = logging.getLogger("alt_memory")
 
@@ -36,37 +36,12 @@ logger = logging.getLogger("alt_memory")
 #               drawers stored system tags / hook chrome verbatim.
 NORMALIZE_VERSION = 2
 
-SKIP_DIRS = {
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "env",
-    "dist",
-    "build",
-    ".next",
-    "coverage",
-    ".ruff_cache",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".cache",
-    ".tox",
-    ".nox",
-    ".idea",
-    ".vscode",
-    ".ipynb_checkpoints",
-    ".eggs",
-    "htmlcov",
-    "target",
-}
-
 # Cached gate keywords — avoids re-reading config per entity
 _GATE_KEYWORDS_CACHE = None
 
 
 def _detect_gate_cached(content: str) -> str:
-    """Route content to a gate using cached keywords. Same logic as miner.detect_gate."""
+    """Route content to a gate using cached keywords."""
     global _GATE_KEYWORDS_CACHE
     if _GATE_KEYWORDS_CACHE is None:
         from alt_memory.config import AltMemoryConfig
@@ -492,8 +467,7 @@ def _file_chunks_locked(dim, source_file, chunks, realm, domain, agent, extract_
         try:
             delete_ids = _source_file_delete_ids(dim, source_file, extract_mode)
             if delete_ids:
-                for did in delete_ids:
-                    dim.delete_entity(did)
+                dim.delete_entities(delete_ids)
         except Exception:
             logger.debug("Stale-entity purge failed for %s", source_file, exc_info=True)
 
@@ -532,15 +506,11 @@ def _file_chunks_locked(dim, source_file, chunks, realm, domain, agent, extract_
                     }
                 )
             try:
-                for doc_id, doc, meta in zip(batch_ids, batch_docs, batch_metas):
-                    dim.add_entity(
-                        realm=meta["realm"],
-                        domain=meta["domain"],
-                        content=doc,
-                        metadata=meta,
-                        source_file=meta["source_file"],
-                        entity_id=doc_id,
-                    )
+                batch_tuples = [
+                    (meta["realm"], meta["domain"], doc, meta, meta["source_file"], doc_id)
+                    for doc_id, doc, meta in zip(batch_ids, batch_docs, batch_metas)
+                ]
+                dim.batch_add_entities(batch_tuples)
                 entities_added += len(batch_docs)
             except Exception as e:
                 if "already exists" not in str(e).lower():

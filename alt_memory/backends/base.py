@@ -23,6 +23,8 @@ from alt_memory.backends.types import (
     _DictCompatMixin,
 )
 
+DEFAULT_DIM = 384
+
 __all__ = [
     "BaseBackend",
     "BaseCollection",

@@ -12,6 +12,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from alt_memory.config import normalize_realm_name
+from alt_memory.dimension import SKIP_DIRS
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,6 @@ FOLDER_DOMAIN_MAP = {
     "config": "configuration", "configs": "configuration", "settings": "configuration",
     "infrastructure": "configuration", "infra": "configuration", "deploy": "configuration",
 }
-
-SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "env", "dist", "build", ".next", "coverage"}
-
 
 def _walk_files(project_dir: str) -> list:
     project_path = Path(project_dir).expanduser().resolve()
@@ -117,10 +115,8 @@ def detect_domains_from_folders(project_dir: str) -> list:
 def detect_domains_from_files(project_dir: str) -> list:
     project_path = Path(project_dir).expanduser().resolve()
     keyword_counts = defaultdict(int)
-    skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
-
     for root, dirs, filenames in os.walk(project_path):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for filename in filenames:
             name_lower = filename.lower().replace("-", "_").replace(" ", "_")
             for keyword, domain in FOLDER_DOMAIN_MAP.items():

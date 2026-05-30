@@ -27,20 +27,16 @@ from alt_memory.miner import (
 )
 from alt_memory.dimension import (
     Dimension, file_already_mined, get_nodes_collection, mine_lock,
-    _validate_dimension_fts5_after_mine,
+    _validate_dimension_fts5_after_mine, SKIP_DIRS,
+    ENTITY_UPSERT_BATCH_SIZE, DEFAULT_MAX_FILE_SIZE,
 )
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_FORMATS = frozenset({".pdf", ".docx", ".pptx", ".xlsx", ".rtf", ".epub"})
-DEFAULT_MAX_FILE_SIZE = 500 * 1024 * 1024
-ENTITY_UPSERT_BATCH_SIZE = 1000
 
 _SKIP_FILENAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 _ENCRYPTED_PATTERNS = re.compile(r"(encrypt|decrypt|password|protected)", re.IGNORECASE)
-_SKIP_DIRS = frozenset({".git", "__pycache__", "node_modules", ".venv", "venv", ".opencode", ".claude"})
-
-
 class ExtractionStatus(enum.Enum):
     OK = "ok"
     SKIP_TOO_LARGE = "skip:too_large"
@@ -200,7 +196,7 @@ def scan_formats(directory: Union[Path, str]) -> list[Path]:
 
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for name in filenames:
             if name in _SKIP_FILENAMES:
                 continue

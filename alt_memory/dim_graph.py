@@ -5,7 +5,7 @@ dim_graph.py — Graph traversal layer for Alt Memory
 Builds a navigable graph from the dimension structure:
   - Nodes = domains (named ideas)
   - Edges = shared domains across realms (tunnels)
-  - Edge types = halls (the corridors)
+   - Edge types = gates (the corridors)
 
 Enables queries like:
   "Start at chromadb-setup in realm_code, walk to realm_myproject"
@@ -138,7 +138,7 @@ def build_graph(dimension=None, config=None):
     for domain, data in domain_data.items():
         nodes[domain] = {
             "realms": sorted(data["realms"]),
-            "halls": sorted(data["halls"]),
+            "gates": sorted(data["gates"]),
             "count": data["count"],
             "dates": sorted(data["dates"])[-5:] if data["dates"] else [],
         }
@@ -172,7 +172,7 @@ def traverse(start_domain: str, dimension=None, config=None, max_hops: int = 2):
     results = [{
         "domain": start_domain,
         "realms": start["realms"],
-        "halls": start["halls"],
+        "gates": start["gates"],
         "count": start["count"],
         "hop": 0,
     }]
@@ -195,7 +195,7 @@ def traverse(start_domain: str, dimension=None, config=None, max_hops: int = 2):
                 results.append({
                     "domain": domain,
                     "realms": data["realms"],
-                    "halls": data["halls"],
+                    "gates": data["gates"],
                     "count": data["count"],
                     "hop": depth + 1,
                     "connected_via": sorted(shared_realms),
@@ -231,7 +231,7 @@ def find_tunnels(realm_a: str = None, realm_b: str = None, dimension=None, confi
         tunnels.append({
             "domain": domain,
             "realms": realms,
-            "halls": data["halls"],
+            "gates": data["gates"],
             "count": data["count"],
             "recent": data["dates"][-1] if data["dates"] else "",
         })

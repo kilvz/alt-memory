@@ -163,12 +163,12 @@ def get_dimension_cursor(dimension, session_id: str) -> Optional[str]:
 
         conn = sqlite3.connect(str(dimension._base / "dimension.db"))
         try:
-            rows = conn.execute(
-                "SELECT metadata FROM entities "
-                "WHERE json_extract(metadata, '$.session_id') = ?",
+            row = conn.execute(
+                "SELECT json_extract(metadata, '$.timestamp') FROM entities "
+                "WHERE json_extract(metadata, '$.session_id') = ? "
+                "ORDER BY json_extract(metadata, '$.timestamp') DESC LIMIT 1",
                 (session_id,),
-            ).fetchall()
-            metas = [json.loads(r[0]) for r in rows if r[0]]
+            ).fetchone()
         finally:
             conn.close()
     except Exception as exc:
@@ -179,10 +179,9 @@ def get_dimension_cursor(dimension, session_id: str) -> Optional[str]:
             exc,
         )
         return None
-    timestamps = [m.get("timestamp") for m in metas if m and m.get("timestamp")]
-    if not timestamps:
-        return None
-    return max(timestamps)
+    if row and row[0]:
+        return row[0]
+    return None
 
 
 # ── Sweep ────────────────────────────────────────────────────────────
@@ -248,6 +247,34 @@ def sweep(jsonl_path: str, dimension_path: str, source_label: Optional[str] = No
     entities_skipped = 0
     entities_excluded = 0
 
+    BATCH_SIZE = 64
+    batch: list[tuple] = []
+    batch_ids_set: set[str] = set()
+
+    def _flush_batch():
+        nonlocal entities_added, entities_already_present
+        if not batch:
+            return
+        # Pre-flight: which IDs in this batch already exist?
+        present = set()
+        if batch_ids_set:
+            placeholders = ",".join("?" * len(batch_ids_set))
+            rows = dimension._db_execute(
+                f"SELECT id FROM entities WHERE id IN ({placeholders})",
+                list(batch_ids_set),
+            ).fetchall()
+            present = {r[0] for r in rows}
+        new_entries = [(r, d, c, m, s, eid)
+                       for (r, d, c, m, s, eid) in batch
+                       if eid not in present]
+        already_count = len(batch) - len(new_entries)
+        if new_entries:
+            dimension.batch_add_entities(new_entries)
+        entities_added += len(new_entries)
+        entities_already_present += already_count
+        batch.clear()
+        batch_ids_set.clear()
+
     for rec in parse_claude_jsonl(jsonl_path):
         sid = rec["session_id"]
         if sid not in cursors:
@@ -285,20 +312,16 @@ def sweep(jsonl_path: str, dimension_path: str, source_label: Optional[str] = No
             entities_added += 1
             continue
 
-        existing = dimension.get_entity(entity_id)
-        if existing:
-            entities_already_present += 1
-            dimension.update_entity(entity_id, content=document, metadata=metadata)
-        else:
-            dimension.add_entity(
-                "sweeper",
-                "messages",
-                document,
-                metadata=metadata,
-                source_file=source_label or jsonl_path,
-                entity_id=entity_id,
-            )
-            entities_added += 1
+        batch.append((
+            "sweeper", "messages", document, metadata,
+            source_label or jsonl_path, entity_id,
+        ))
+        batch_ids_set.add(entity_id)
+
+        if len(batch) >= BATCH_SIZE:
+            _flush_batch()
+
+    _flush_batch()
 
     return {
         "entities_added": entities_added,

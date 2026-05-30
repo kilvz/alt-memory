@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from alt_memory.i18n import get_entity_patterns
+from alt_memory.dimension import SKIP_DIRS, _ENTITY_STOPLIST
 
 logger = logging.getLogger(__name__)
 
@@ -80,20 +81,6 @@ PROSE_EXTENSIONS = {
     ".md",
     ".rst",
     ".csv",
-}
-
-SKIP_DIRS = {
-    ".git",
-    "node_modules",
-    "__pycache__",
-    ".venv",
-    "venv",
-    "env",
-    "dist",
-    "build",
-    ".next",
-    "coverage",
-    ".alt-memory",
 }
 
 # ---------------------------------------------------------------------------
@@ -384,50 +371,6 @@ _SEQUENCE_BREAKERS: set[str] = {
     "However", "Therefore", "Furthermore", "Moreover", "Additionally",
     "Also", "Even", "Just", "Only", "Really", "Actually",
 }
-
-_ENTITY_STOPLIST: set[str] = {
-    "The", "This", "That", "These", "Those",
-    "I", "You", "He", "She", "It", "We", "They",
-    "My", "Your", "His", "Her", "Its", "Our", "Their",
-    "Mine", "Yours", "Hers", "Ours", "Theirs",
-    "A", "An", "And", "But", "Or", "For", "Nor", "Yet", "So",
-    "If", "Then", "Else", "When", "Where", "Why", "How",
-    "Which", "What", "Who", "Whom", "Whose",
-    "All", "Each", "Every", "Both", "Few", "Many", "Much",
-    "Some", "Any", "No", "Not", "None", "Nothing",
-    "Only", "Just", "Also", "Very", "Too", "Here", "There",
-    "Please", "Hello", "Hi", "Hey", "Goodbye", "Bye",
-    "Thanks", "Thank", "Please",
-    # Months
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-    # Days
-    "Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
-    "Saturday", "Sunday",
-    # Generic
-    "Yesterday", "Today", "Tomorrow",
-    "User", "Assistant", "System", "Human", "Bot",
-    "Note", "Warning", "Error", "Info", "Debug",
-    "Todo", "FIXME", "HACK", "XXX",
-    "Yes", "No", "True", "False", "None", "Null", "NaN",
-    "Type", "Value", "Key", "Name", "File", "Line",
-    "Up", "Down", "Left", "Right", "On", "Off",
-    "First", "Second", "Third", "Last", "Next", "Previous",
-    "Top", "Bottom", "Middle", "Center",
-    "New", "Old", "Good", "Bad", "Great", "Little",
-    "Big", "Large", "Small", "High", "Low", "Long", "Short",
-    "Once", "Twice", "Often", "Always", "Never", "Sometimes",
-    "Please", "Sorry", "Hello", "Hi",
-    # Title words (caught by specific patterns instead)
-    "Dr", "Prof", "Mr", "Ms", "Mrs", "Sir", "Lady", "Lord",
-    "Capt", "Sgt", "Rep", "Sen", "Gov", "Pres", "VP",
-    # Gerunds & verbs commonly at sentence start
-    "Using", "Building", "Creating", "Working", "Running", "Testing",
-    "Developing", "Deploying", "Installing", "Configuring", "Setting",
-    "Getting", "Putting", "Making", "Doing", "Going", "Taking",
-    "Adding", "Removing", "Updating", "Fixing", "Starting", "Stopping",
-}
-
 
 class EntityDetector:
     """Detects named entities in text using regex patterns and heuristics."""
@@ -1216,3 +1159,42 @@ def scan_for_detection(project_dir: str, max_files: int = 10) -> list:
 
     files = prose_files if len(prose_files) >= 3 else prose_files + all_files
     return files[:max_files]
+
+
+def _extract_candidate_words(
+    text: str, min_len: int = 2, deduplicate: bool = False
+) -> dict[str, int] | list[str]:
+    """Shared entity-candidate extraction — used by miner.py and dimension.py.
+
+    Returns a dict of ``{word: count}`` when ``deduplicate=False`` (miner style),
+    or a deduplicated list when ``deduplicate=True`` (dimension style).
+    """
+    _coca = _get_coca_filter()
+    from alt_memory.i18n import get_entity_patterns
+    ep = get_entity_patterns()
+    stopwords = frozenset(w.lower() for w in ep.get("stopwords", []))
+    cleaned, sys_counts = _apply_known_systems_prepass(text)
+
+    if deduplicate:
+        result: list[str] = []
+        seen: set[str] = set()
+        for m in re.finditer(rf"\b[A-Z][a-zA-Z'\-]{{{min_len},50}}\b", cleaned):
+            word = m.group()
+            low = word.lower()
+            if word in _ENTITY_STOPLIST or low in stopwords or low in _coca or word in seen:
+                continue
+            seen.add(word)
+            result.append(word)
+        return result
+
+    counter: dict[str, int] = {}
+    for name, count in sys_counts.items():
+        if name not in _ENTITY_STOPLIST and name.lower() not in stopwords and name.lower() not in _coca:
+            counter[name] = counter.get(name, 0) + count
+    for m in re.finditer(rf"\b[A-Z][a-zA-Z'\-]{{{min_len},50}}\b", cleaned):
+        word = m.group()
+        low = word.lower()
+        if word in _ENTITY_STOPLIST or low in stopwords or low in _coca:
+            continue
+        counter[word] = counter.get(word, 0) + 1
+    return counter

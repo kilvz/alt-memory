@@ -174,9 +174,10 @@ def main():
 
     p_rebuild_sqlite = sub.add_parser("rebuild-from-sqlite", help="Rebuild FAISS from SQLite ground truth")
 
-    p_wake = sub.add_parser("wake-up", help="Show L0+L1 wake-up context")
-    p_wake.add_argument("--agent", required=True, help="Agent name")
-    p_wake.add_argument("--last-n", type=int, default=5, help="Entries per layer")
+    p_wake = sub.add_parser("wake-up", help="Show L0+L1 wake-up context (dimension-scoped or agent records)")
+    p_wake.add_argument("--agent", default=None, help="Agent name (omit for dimension-scoped wake-up)")
+    p_wake.add_argument("--realm", "-w", default=None, help="Realm filter for dimension-scoped wake-up")
+    p_wake.add_argument("--last-n", type=int, default=5, help="Entries per layer (agent mode only)")
 
     args = parser.parse_args()
 
@@ -549,13 +550,20 @@ def main():
         elif args.command == "wake-up":
             from alt_memory.layers import MemoryStack
             stack = MemoryStack(dim)
-            all_layers = stack.read_all(args.agent, last_n=args.last_n)
-            for layer_num in sorted(all_layers):
-                layer_name = MemoryStack.LAYER_NAMES[layer_num]
-                entries = all_layers[layer_num]
-                print(f"\n--- {layer_name} ({len(entries)} entries) ---")
-                for e in entries:
-                    print(f"  [{e['created_at']}] {e['content'][:200]}")
+            if args.agent:
+                all_layers = stack.read_all(args.agent, last_n=args.last_n)
+                for layer_num in sorted(all_layers):
+                    layer_name = MemoryStack.LAYER_NAMES[layer_num]
+                    entries = all_layers[layer_num]
+                    print(f"\n--- {layer_name} ({len(entries)} entries) ---")
+                    for e in entries:
+                        print(f"  [{e['created_at']}] {e['content'][:200]}")
+            else:
+                text = stack.wake_up(realm=args.realm)
+                tokens = len(text) // 4
+                print(f"Wake-up text (~{tokens} tokens):")
+                print("=" * 50)
+                print(text)
 
         elif args.command == "mcp":
             from alt_memory.mcp_server import run_server

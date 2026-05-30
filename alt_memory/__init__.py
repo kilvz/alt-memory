@@ -15,6 +15,13 @@ from alt_memory.dialect import (
     aaak_decompress,
     aaak_parse_entry,
     aaak_validate,
+    aaak_detect_emotions,
+    aaak_detect_flags,
+    aaak_extract_topics,
+    aaak_extract_key_sentence,
+    aaak_count_tokens,
+    aaak_compression_stats,
+    AaakDialect,
 )
 from alt_memory.layers import MemoryStack
 from alt_memory.entity_detector import EntityDetector
@@ -82,6 +89,13 @@ __all__ = [
     "aaak_decompress",
     "aaak_parse_entry",
     "aaak_validate",
+    "aaak_detect_emotions",
+    "aaak_detect_flags",
+    "aaak_extract_topics",
+    "aaak_extract_key_sentence",
+    "aaak_count_tokens",
+    "aaak_compression_stats",
+    "AaakDialect",
     "mine_file_into_dimension",
     "mine_text_into_dimension",
     "mine_conversation",

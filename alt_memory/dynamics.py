@@ -1,4 +1,4 @@
-"""dynamics.py — Living-connection math for halls + tunnels.
+"""dynamics.py — Living-connection math for gates + tunnels.
 
 Hebbian potentiation (strength grows on co-access) and Ebbinghaus exponential
 decay (strength fades with time since last activation), with the Cepeda

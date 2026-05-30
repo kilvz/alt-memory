@@ -6,6 +6,7 @@ pipe-delimited fields, and structured metadata. Decompresses back to readable fo
 
 import re
 import string
+from pathlib import Path
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -86,6 +87,85 @@ _KNOWN_LOCATIONS = frozenset({
     'chicago', 'los angeles', 'sydney', 'melbourne', 'toronto',
     'vancouver', 'amsterdam', 'zurich', 'singapore', 'hong kong',
     'dubai', 'mumbai', 'bangkok', 'seoul', 'shanghai',
+})
+
+# ── AAAK Emotion Signals ──────────────────────────────────────────────────────
+
+EMOTION_SIGNALS: dict[str, str] = {
+    'decided': 'determ',
+    'prefer': 'convict',
+    'worried': 'anx',
+    'excited': 'excite',
+    'frustrated': 'frust',
+    'confused': 'confuse',
+    'love': 'love',
+    'hate': 'rage',
+    'hope': 'hope',
+    'fear': 'fear',
+    'trust': 'trust',
+    'happy': 'joy',
+    'sad': 'grief',
+    'surprised': 'surprise',
+    'grateful': 'grat',
+    'curious': 'curious',
+    'wonder': 'wonder',
+    'anxious': 'anx',
+    'relieved': 'relief',
+    'satisf': 'satis',
+    'disappoint': 'grief',
+    'concern': 'anx',
+    'gratitude': 'grat',
+    'excitement': 'excite',
+    'frustration': 'frust',
+    'confusion': 'confuse',
+    'curiosity': 'curious',
+    'determination': 'determ',
+    'conviction': 'convict',
+}
+
+# ── AAAK Flag Signals ─────────────────────────────────────────────────────────
+
+FLAG_SIGNALS: dict[str, str] = {
+    'decided': 'DECISION',
+    'chose': 'DECISION',
+    'switched': 'DECISION',
+    'migrated': 'DECISION',
+    'replaced': 'DECISION',
+    'instead of': 'DECISION',
+    'because': 'DECISION',
+    'founded': 'ORIGIN',
+    'created': 'ORIGIN',
+    'started': 'ORIGIN',
+    'born': 'ORIGIN',
+    'launched': 'ORIGIN',
+    'first time': 'ORIGIN',
+    'core': 'CORE',
+    'fundamental': 'CORE',
+    'essential': 'CORE',
+    'principle': 'CORE',
+    'belief': 'CORE',
+    'always': 'CORE',
+    'never forget': 'CORE',
+    'turning point': 'PIVOT',
+    'changed everything': 'PIVOT',
+    'realized': 'PIVOT',
+    'breakthrough': 'PIVOT',
+    'epiphany': 'PIVOT',
+    'api': 'TECHNICAL',
+    'database': 'TECHNICAL',
+    'architecture': 'TECHNICAL',
+    'deploy': 'TECHNICAL',
+    'infrastructure': 'TECHNICAL',
+    'algorithm': 'TECHNICAL',
+    'framework': 'TECHNICAL',
+    'server': 'TECHNICAL',
+    'config': 'TECHNICAL',
+}
+
+_DECISION_WORDS: frozenset = frozenset({
+    'decided', 'because', 'instead', 'prefer', 'switched', 'chose',
+    'realized', 'important', 'key', 'critical', 'discovered', 'learned',
+    'conclusion', 'solution', 'reason', 'why', 'breakthrough', 'insight',
 })
 
 # ── Regex Patterns ───────────────────────────────────────────────────────────
@@ -354,6 +434,264 @@ def _detect_emotion(text: str) -> str | None:
 def _detect_date(text: str) -> str | None:
     m = _DATE_ISO_RE.search(text)
     return m.group(1) if m else None
+
+
+# ── Enhanced Emotion/Flag/Topic/Sentence Detection ──────────────────────────
+
+
+def aaak_detect_emotions(text: str) -> list[str]:
+    """Detect emotion codes from plain text using keyword signals."""
+    text_lower = text.lower()
+    detected = []
+    seen = set()
+    for keyword, code in EMOTION_SIGNALS.items():
+        if keyword in text_lower and code not in seen:
+            detected.append(code)
+            seen.add(code)
+    return detected[:3]
+
+
+def aaak_detect_flags(text: str) -> list[str]:
+    """Detect importance/context flags from plain text using keyword signals."""
+    text_lower = text.lower()
+    detected = []
+    seen = set()
+    for keyword, flag in FLAG_SIGNALS.items():
+        if keyword in text_lower and flag not in seen:
+            detected.append(flag)
+            seen.add(flag)
+    return detected[:3]
+
+
+def aaak_extract_topics(text: str, max_topics: int = 3) -> list[str]:
+    """Extract key topic words from plain text using frequency analysis."""
+    words = re.findall(r"[a-zA-Z][a-zA-Z_-]{2,}", text)
+    freq = {}
+    for w in words:
+        w_lower = w.lower()
+        if w_lower in _STOPWORDS or len(w_lower) < 3:
+            continue
+        freq[w_lower] = freq.get(w_lower, 0) + 1
+
+    for w in words:
+        w_lower = w.lower()
+        if w_lower in _STOPWORDS:
+            continue
+        if w[0].isupper() and w_lower in freq:
+            freq[w_lower] += 2
+        if '_' in w or '-' in w or (any(c.isupper() for c in w[1:])):
+            if w_lower in freq:
+                freq[w_lower] += 2
+
+    ranked = sorted(freq.items(), key=lambda x: -x[1])
+    return [w for w, _ in ranked[:max_topics]]
+
+
+def aaak_extract_key_sentence(text: str) -> str:
+    """Extract the most important sentence fragment from text."""
+    sentences = re.split(r"[.!?\n]+", text)
+    sentences = [s.strip() for s in sentences if len(s.strip()) > 10]
+    if not sentences:
+        return ''
+
+    scored = []
+    for s in sentences:
+        score = 0
+        s_lower = s.lower()
+        for w in _DECISION_WORDS:
+            if w in s_lower:
+                score += 2
+        if len(s) < 80:
+            score += 1
+        if len(s) < 40:
+            score += 1
+        if len(s) > 150:
+            score -= 2
+        scored.append((score, s))
+
+    scored.sort(key=lambda x: -x[0])
+    best = scored[0][1]
+    if len(best) > 55:
+        best = best[:52] + '...'
+    return best
+
+
+def aaak_count_tokens(text: str) -> int:
+    """Estimate token count (~1.3 tokens per word)."""
+    words = text.split()
+    return max(1, int(len(words) * 1.3))
+
+
+def aaak_compression_stats(original: str, compressed: str) -> dict:
+    """Get size comparison stats for original -> AAAK compression."""
+    orig_tokens = aaak_count_tokens(original)
+    comp_tokens = aaak_count_tokens(compressed)
+    return {
+        'original_tokens_est': orig_tokens,
+        'summary_tokens_est': comp_tokens,
+        'size_ratio': round(orig_tokens / max(comp_tokens, 1), 1),
+        'original_chars': len(original),
+        'summary_chars': len(compressed),
+        'note': 'Estimates only. Use tiktoken for accurate counts. AAAK is lossy.',
+    }
+
+
+# ── AaakDialect Class ──────────────────────────────────────────────────────
+
+
+class AaakDialect:
+    """AAAK encoder with configurable entity mappings, emotion/flag/topic extraction.
+
+    Usage:
+        # Basic usage
+        dialect = AaakDialect()
+        compressed = dialect.compress("We decided to use Python instead of Java...")
+
+        # With custom entity codes
+        dialect = AaakDialect(entities={"Alice": "ALC"})
+
+        # From config file
+        dialect = AaakDialect.from_config("entities.json")
+    """
+
+    def __init__(
+        self,
+        entities: dict[str, str] | None = None,
+        skip_names: list[str] | None = None,
+    ):
+        self.entity_codes: dict[str, str] = {}
+        if entities:
+            for name, code in entities.items():
+                self.entity_codes[name] = code
+                self.entity_codes[name.lower()] = code
+        self.skip_names = [n.lower() for n in (skip_names or [])]
+
+    @classmethod
+    def from_config(cls, config_path: str) -> 'AaakDialect':
+        """Load entity mappings from a JSON config file."""
+        import json
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        return cls(
+            entities=config.get('entities', {}),
+            skip_names=config.get('skip_names', []),
+        )
+
+    def save_config(self, config_path: str) -> None:
+        """Save current entity mappings to a JSON config file."""
+        import json
+        canonical = {}
+        seen_codes = set()
+        for name, code in self.entity_codes.items():
+            if code not in seen_codes and not name.islower():
+                canonical[name] = code
+                seen_codes.add(code)
+            elif code not in seen_codes:
+                canonical[name] = code
+                seen_codes.add(code)
+
+        config = {
+            'entities': canonical,
+            'skip_names': self.skip_names,
+        }
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2)
+
+    def encode_entity(self, name: str) -> str | None:
+        """Convert a person/entity name to its short code."""
+        if any(s in name.lower() for s in self.skip_names):
+            return None
+        if name in self.entity_codes:
+            return self.entity_codes[name]
+        if name.lower() in self.entity_codes:
+            return self.entity_codes[name.lower()]
+        for key, code in self.entity_codes.items():
+            if key.lower() in name.lower():
+                return code
+        return name[:3].upper()
+
+    def compress(self, text: str, metadata: dict | None = None) -> str:
+        """Compress plain text into AAAK Dialect format (lossy).
+
+        Extracts entities, topics, key sentence, emotions, and flags.
+        """
+        metadata = metadata or {}
+
+        entities_found = _find_entities(text)
+        entity_codes = []
+        for ent in entities_found:
+            code = self.encode_entity(ent['name'])
+            if code and code not in entity_codes:
+                entity_codes.append(code)
+        entity_str = '+'.join(entity_codes[:3]) if entity_codes else '???'
+
+        topics = aaak_extract_topics(text)
+        topic_str = '_'.join(topics[:3]) if topics else 'misc'
+
+        quote = aaak_extract_key_sentence(text)
+        quote_part = f'"{quote}"' if quote else ''
+
+        emotions = aaak_detect_emotions(text)
+        emotion_str = '+'.join(emotions) if emotions else ''
+
+        flags = aaak_detect_flags(text)
+        flag_str = '+'.join(flags) if flags else ''
+
+        source = metadata.get('source_file', '')
+        realm = metadata.get('realm', '')
+        domain = metadata.get('domain', '')
+        date = metadata.get('date', '')
+
+        lines = []
+
+        if source or realm:
+            header_parts = [
+                realm or '?',
+                domain or '?',
+                date or '?',
+                Path(source).stem if source else '?',
+            ]
+            lines.append('|'.join(header_parts))
+
+        parts = [f'0:{entity_str}', topic_str]
+        if quote_part:
+            parts.append(quote_part)
+        if emotion_str:
+            parts.append(emotion_str)
+        if flag_str:
+            parts.append(flag_str)
+
+        lines.append('|'.join(parts))
+        return '\n'.join(lines)
+
+    def decode(self, dialect_text: str) -> dict:
+        """Parse an AAAK Dialect string back into a readable summary."""
+        import json as _json
+        text_lines = dialect_text.strip().split('\n')
+        result = {'header': {}, 'zettels': []}
+
+        for line in text_lines:
+            if '|' in line and ':' in line.split('|')[0]:
+                result['zettels'].append(line)
+            elif '|' in line:
+                parts = line.split('|')
+                result['header'] = {
+                    'file': parts[0] if len(parts) > 0 else '',
+                    'entities': parts[1] if len(parts) > 1 else '',
+                    'date': parts[2] if len(parts) > 2 else '',
+                    'title': parts[3] if len(parts) > 3 else '',
+                }
+
+        return result
+
+    def compression_stats(self, original: str, compressed: str) -> dict:
+        """Get size comparison stats for original -> AAAK compression."""
+        return aaak_compression_stats(original, compressed)
+
+    @staticmethod
+    def count_tokens(text: str) -> int:
+        """Estimate token count (~1.3 tokens per word)."""
+        return aaak_count_tokens(text)
 
 
 # ── Public API ───────────────────────────────────────────────────────────────

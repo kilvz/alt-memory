@@ -15,12 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-SKIP_DIRS = {
-    ".git", "node_modules", "__pycache__", ".venv", "venv", "env",
-    "dist", "build", ".next", "coverage", ".terraform", "vendor",
-    "target", ".alt-memory", ".cache", ".pytest_cache", ".mypy_cache",
-    ".ruff_cache",
-}
+from alt_memory.dimension import SKIP_DIRS
 
 MAX_DEPTH = 6
 MAX_COMMITS_PER_REPO = 1000

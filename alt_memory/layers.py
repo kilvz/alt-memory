@@ -1,6 +1,11 @@
-"""Agent record memory layers (L0-L3) stored as Dimension entities."""
+"""Agent record memory layers (L0-L3) stored as Dimension entities,
+plus dimension-scoped wake-up context (L0 identity + L1 essential story)."""
 
 import logging
+import os
+import sys
+from collections import defaultdict
+from pathlib import Path
 from typing import Optional
 
 from alt_memory.dimension import Dimension, _sanitize
@@ -9,11 +14,17 @@ logger = logging.getLogger(__name__)
 
 
 class MemoryStack:
-    """Agent record memory with hierarchical layers L0-L3.
+    """Agent record memory with hierarchical layers L0-L3, plus dimension-scoped wake-up context.
 
-    Each layer is stored as a domain within a per-agent realm:
+    Agent-record layers (stored as entities in per-agent realms):
       realm: agent_{sanitized_name}
       domains: 'layer_0_identity', 'layer_1_essential', 'layer_2_working', 'layer_3_archive'
+
+    Dimension wake-up context (generated on-the-fly from dimension data):
+      L0: ~/.alt-memory/identity.txt (user-authored identity)
+      L1: Top entities from the dimension, scored by importance/weight
+      L2: On-demand realm/domain filtered retrieval
+      L3: Full semantic search
     """
 
     LAYER_NAMES = {
@@ -23,8 +34,13 @@ class MemoryStack:
         3: "layer_3_archive",
     }
 
-    def __init__(self, dimension: Dimension):
+    MAX_ENTITIES = 15
+    MAX_CHARS = 3200
+    MAX_SCAN = 2000
+
+    def __init__(self, dimension: Dimension, identity_path: Optional[str] = None):
         self._dimension = dimension
+        self._identity_path = identity_path or os.path.expanduser("~/.alt-memory/identity.txt")
 
     def _validate_layer(self, layer: int) -> None:
         if layer not in self.LAYER_NAMES:
@@ -204,3 +220,199 @@ class MemoryStack:
             agent_name, 0, content=text, topic="identity_update",
             metadata={"facts": facts},
         )
+
+    # ------------------------------------------------------------------
+    # Dimension-scoped wake-up context (L0-L3)
+    # ------------------------------------------------------------------
+
+    def _load_l0_identity(self) -> str:
+        """Load identity from ~/.alt-memory/identity.txt or return a sensible default."""
+        path = self._identity_path
+        if os.path.exists(path):
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        return "## L0 \u2014 IDENTITY\nNo identity configured. Create ~/.alt-memory/identity.txt"
+
+    def _generate_l1_essential(self, realm: Optional[str] = None) -> str:
+        """Auto-generate essential story from top-scored dimension entities."""
+        dim = self._dimension
+        _BATCH = 500
+        entities = []
+        offset = 0
+        while True:
+            batch = dim.list_entities(realm=realm, limit=_BATCH, offset=offset)
+            if not batch:
+                break
+            entities.extend(batch)
+            offset += len(batch)
+            if len(batch) < _BATCH or len(entities) >= self.MAX_SCAN:
+                break
+
+        if not entities:
+            return "## L1 \u2014 No memories yet."
+
+        scored = []
+        for e in entities:
+            meta = e.get("metadata", {}) or {}
+            doc = e.get("content", "") or ""
+            importance = 3
+            for key in ("importance", "weight", "priority", "emotional_weight"):
+                val = meta.get(key)
+                if val is not None:
+                    try:
+                        importance = float(val)
+                    except (ValueError, TypeError):
+                        pass
+                    break
+            scored.append((importance, meta, doc))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top = scored[:self.MAX_ENTITIES]
+
+        by_domain = defaultdict(list)
+        for imp, meta, doc in top:
+            domain = meta.get("domain", "general")
+            by_domain[domain].append((imp, meta, doc))
+
+        lines = ["## L1 \u2014 ESSENTIAL STORY"]
+        total_len = 0
+        for domain, entries in sorted(by_domain.items()):
+            domain_line = f"\n[{domain}]"
+            lines.append(domain_line)
+            total_len += len(domain_line)
+
+            for _imp, meta, doc in entries:
+                src = Path(meta.get("source_file", "")).name if meta.get("source_file") else ""
+                snippet = doc.strip().replace("\n", " ")
+                if len(snippet) > 200:
+                    snippet = snippet[:197] + "..."
+                entry_line = f"  - {snippet}"
+                if src:
+                    entry_line += f"  ({src})"
+                if total_len + len(entry_line) > self.MAX_CHARS:
+                    lines.append("  ... (more in L3 search)")
+                    return "\n".join(lines)
+                lines.append(entry_line)
+                total_len += len(entry_line)
+
+        return "\n".join(lines)
+
+    def wake_up(self, realm: Optional[str] = None) -> str:
+        """Generate wake-up context: L0 (identity) + L1 (essential story).
+
+        Typically ~600-900 tokens. Suitable for system prompt injection.
+
+        Args:
+            realm: Optional realm filter for L1 (project-specific wake-up).
+        """
+        parts = [self._load_l0_identity(), "", self._generate_l1_essential(realm=realm)]
+        return "\n".join(parts)
+
+    def recall(self, realm: Optional[str] = None, domain: Optional[str] = None,
+               limit: int = 10) -> str:
+        """On-demand L2 retrieval filtered by realm/domain.
+
+        Returns formatted text with recent entities.
+        """
+        entities = self._dimension.list_entities(realm=realm, domain=domain, limit=limit)
+        if not entities:
+            label = f"realm={realm}" if realm else ""
+            if domain:
+                label += f" domain={domain}" if label else f"domain={domain}"
+            return f"No entities found for {label}."
+
+        lines = [f"## L2 \u2014 ON-DEMAND ({len(entities)} entities)"]
+        for e in entities:
+            meta = e.get("metadata", {}) or {}
+            doc = e.get("content", "") or ""
+            domain_name = meta.get("domain", "?")
+            src = Path(meta.get("source_file", "")).name if meta.get("source_file") else ""
+            snippet = doc.strip().replace("\n", " ")
+            if len(snippet) > 300:
+                snippet = snippet[:297] + "..."
+            entry = f"  [{domain_name}] {snippet}"
+            if src:
+                entry += f"  ({src})"
+            lines.append(entry)
+
+        return "\n".join(lines)
+
+    def deep_search(self, query: str, realm: Optional[str] = None,
+                    domain: Optional[str] = None, n_results: int = 5) -> str:
+        """Deep L3 semantic search.
+
+        Returns formatted text with search results and similarity scores.
+        """
+        results = self._dimension.search(
+            query=query, realm=realm, domain=domain,
+            n_results=n_results, mode="hybrid",
+        )
+        if not results:
+            return f'No results found for "{query}".'
+
+        lines = [f'## L3 \u2014 SEARCH RESULTS for "{query}"']
+        for i, r in enumerate(results, 1):
+            meta = r.metadata or {}
+            doc = r.text or ""
+            similarity = round(max(0.0, 1.0 - r.distance), 3)
+            realm_name = meta.get("realm", "?")
+            domain_name = meta.get("domain", "?")
+            src = Path(meta.get("source_file", "")).name if meta.get("source_file") else ""
+
+            snippet = doc.strip().replace("\n", " ")
+            if len(snippet) > 300:
+                snippet = snippet[:297] + "..."
+
+            lines.append(f"  [{i}] {realm_name}/{domain_name} (sim={similarity})")
+            lines.append(f"      {snippet}")
+            if src:
+                lines.append(f"      src: {src}")
+
+        return "\n".join(lines)
+
+    def deep_search_raw(self, query: str, realm: Optional[str] = None,
+                        domain: Optional[str] = None, n_results: int = 5) -> list[dict]:
+        """Deep L3 semantic search returning raw dicts instead of formatted text."""
+        results = self._dimension.search(
+            query=query, realm=realm, domain=domain,
+            n_results=n_results, mode="hybrid",
+        )
+        hits = []
+        for r in results:
+            meta = r.metadata or {}
+            hits.append({
+                "text": r.text,
+                "realm": meta.get("realm", "unknown"),
+                "domain": meta.get("domain", "unknown"),
+                "source_file": Path(meta.get("source_file", "?")).name,
+                "similarity": round(max(0.0, 1.0 - r.distance), 3),
+                "metadata": meta,
+            })
+        return hits
+
+    def layer_status(self) -> dict:
+        """Status of all layers — identity file, entity counts, search availability."""
+        dim = self._dimension
+        result = {
+            "dimension_path": str(dim._base) if hasattr(dim, "_base") else "?",
+            "L0_identity": {
+                "path": self._identity_path,
+                "exists": os.path.exists(self._identity_path),
+            },
+            "L1_essential": {
+                "description": "Auto-generated from top dimension entities",
+                "max_entities": self.MAX_ENTITIES,
+            },
+            "L2_on_demand": {
+                "description": "Realm/domain filtered retrieval",
+            },
+            "L3_deep_search": {
+                "description": "Full semantic search via FAISS + FTS5",
+            },
+        }
+        try:
+            s = dim.status()
+            result["total_entities"] = s.get("entities", 0)
+        except Exception:
+            result["total_entities"] = 0
+        return result

@@ -404,6 +404,43 @@ Read with:
 alt-memory wake-up --agent claude --last-n 5
 ```
 
+### Personas (Isolated Memory Realms per Agent Identity)
+
+Personas let you switch between different agent identities, each with its own isolated memory realm. When you set a persona, the system creates/activates a `persona_<name>` realm — all subsequent entity additions, searches, and records are scoped there.
+
+```bash
+# CLI (no direct persona command — use MCP or Python API)
+# Python API
+from alt_memory import Dimension
+d = Dimension()
+d.init()
+
+d.set_persona("coder")        # creates realm persona_coder
+d.add_entity("persona_coder", "bugs", "Bug found in parser")
+d.set_persona("writer")       # switches to persona_writer
+d.add_entity("persona_writer", "ideas", "Story concept about AI")
+```
+
+```python
+d.get_persona()  # returns "writer" (or "" if unset)
+```
+
+**People map** — associates name variants with canonical names for entity resolution:
+
+```python
+d.set_people_map({"Alex": "Alexander", "Sasha": "Alexander", "Beth": "Elizabeth"})
+d.get_people_map()  # returns the map
+```
+
+MCP:
+```json
+{"name": "set_persona", "arguments": {"name": "coder"}}
+{"name": "get_persona", "arguments": {}}
+{"name": "set_people_map", "arguments": {"map": {"Alex": "Alexander"}}}
+```
+
+Persona state is persisted in `~/.alt-memory/persona.json`. Switching persona doesn't delete or hide other realms — it just provides a convenient scoped identity for the active session.
+
 ---
 
 ## Docker

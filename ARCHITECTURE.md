@@ -347,6 +347,76 @@ personal/ideas ──tunnel──▶ work/features
 
 ---
 
+## Personas (Character Definitions)
+
+A persona is a **character definition** — system prompt + metadata — that defines how an AI agent behaves. Modeled after [Eternal AI's on-chain agent persona](https://github.com/eternalai-org/eternal-ai) (character file minted as ERC-721 NFT, injected as `system` role in LLM calls).
+
+### Persona Schema
+
+```python
+{
+    "name": "donald_trump",              # unique identifier
+    "system_prompt": "Act as if...",     # character system prompt
+    "description": "Donald Trump twin",  # short description
+    "model": "DeepSeek-R1-Distill-Llama-70B",  # preferred LLM
+    "framework": "eternalai",             # agent framework
+    "metadata": {"chain": "base"}         # extensible
+}
+```
+
+### Storage
+
+Personae are stored in `persona.json` in the dimension directory:
+
+```json
+{
+  "active": "donald_trump",
+  "personas": {
+    "donald_trump": {
+      "name": "donald_trump",
+      "system_prompt": "Act as if you are Donald Trump...",
+      "description": "A Donald Trump twin",
+      "model": "DeepSeek-R1-Distill-Llama-70B",
+      "framework": "eternalai",
+      "metadata": {"chain": "base"}
+    }
+  }
+}
+```
+
+Legacy format `{"persona": "name"}` is auto-upgraded on read.
+
+### Key Methods (`dimension.py:1598-1741`)
+
+| Method | Description |
+|--------|-------------|
+| `get_persona()` | Return active persona dict (or `{"name": ""}`) |
+| `set_persona(name, system_prompt, ...)` | Set active persona + character def, creates `persona_<name>` realm |
+| `create_persona(name, ...)` | Create persona without activating (raises if exists) |
+| `list_personas()` | List all registered persona characters with `active` flag |
+| `delete_persona(name)` | Remove from registry (does NOT delete realm or entities) |
+| `get_persona_character(name)` | Get system prompt string for a persona (active by default) |
+
+### Persona Realm Isolation
+
+Setting a persona as active creates a `persona_<name>` realm. All memory operations targeting that realm are isolated from other personas. Switching persona doesn't hide or delete other realms — it just changes the active identity.
+
+Unlike the old system (where persona was just a bare namespace label), the new persona carries a full character definition that an AI agent can inject as its system prompt, matching how Eternal AI agents use character files.
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `get_persona` | Get active persona with full character definition |
+| `set_persona` | Set active persona with optional character fields |
+| `switch_persona` | Alias for set_persona |
+| `create_persona` | Create persona without activating |
+| `list_personas` | List all registered persona characters |
+| `delete_persona` | Remove persona from registry |
+| `get_persona_character` | Get system prompt string |
+
+---
+
 ## Agent Diaries (Records)
 
 Per-agent temporal entries stored in `realm=agent_<name>`, `domain=record`:

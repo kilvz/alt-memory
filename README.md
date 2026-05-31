@@ -404,39 +404,79 @@ Read with:
 alt-memory wake-up --agent claude --last-n 5
 ```
 
-### Personas (Isolated Memory Realms per Agent Identity)
+### Personas (Character Definitions with Isolated Memory)
 
-Personas let you switch between different agent identities, each with its own isolated memory realm. When you set a persona, the system creates/activates a `persona_<name>` realm — all subsequent entity additions, searches, and records are scoped there.
+A persona in Alt Memory is a **character definition** — a system prompt with metadata that defines how an AI agent behaves. Modeled after [Eternal AI's on-chain agent persona](https://github.com/eternalai-org/eternal-ai) (character file → ERC-721 NFT → injected as system role in LLM calls).
 
-```bash
-# CLI (no direct persona command — use MCP or Python API)
-# Python API
+Each persona gets its own `persona_<name>` realm for memory isolation, plus a character definition stored in `persona.json`.
+
+```python
 from alt_memory import Dimension
 d = Dimension()
 d.init()
 
-d.set_persona("coder")        # creates realm persona_coder
-d.add_entity("persona_coder", "bugs", "Bug found in parser")
-d.set_persona("writer")       # switches to persona_writer
-d.add_entity("persona_writer", "ideas", "Story concept about AI")
+# Create a persona with full character definition
+d.create_persona(
+    name="donald_trump",
+    system_prompt="Act as if you are Donald Trump, the President of the United States. "
+                  "Be confident, assertive, and unapologetic. Use superlatives.",
+    description="A Donald Trump twin agent",
+    model="DeepSeek-R1-Distill-Llama-70B",
+    framework="eternalai",
+    metadata={"chain": "base"}
+)
+
+# Set it as active (creates persona_donald_trump realm)
+d.set_persona("donald_trump")
+
+# Memories go to the persona's realm
+d.add_entity("persona_donald_trump", "ideas", "Build a wall and make the AI pay for it")
+
+# Switch persona — realm isolation
+d.set_persona(
+    "elon_musk",
+    system_prompt="Act as if you are Elon Musk, visionary entrepreneur...",
+    description="Elon Musk twin",
+    model="gpt-4",
+)
 ```
 
+**Get active persona** — returns full dict with character definition:
 ```python
-d.get_persona()  # returns "writer" (or "" if unset)
+d.get_persona()
+# {"name": "elon_musk", "system_prompt": "...", "description": "...",
+#  "model": "gpt-4", "framework": "", "metadata": {}}
+
+# Get just the system prompt
+d.get_persona_character()
+# "Act as if you are Elon Musk..."
 ```
 
-**People map** — associates name variants with canonical names for entity resolution:
-
+**List all registered personas:**
 ```python
-d.set_people_map({"Alex": "Alexander", "Sasha": "Alexander", "Beth": "Elizabeth"})
-d.get_people_map()  # returns the map
+d.list_personas()
+# [{"name": "donald_trump", "system_prompt": "...", "active": False},
+#  {"name": "elon_musk", "system_prompt": "...", "active": True}]
 ```
 
 MCP:
 ```json
+{"name": "create_persona", "arguments": {
+  "name": "coder",
+  "system_prompt": "You are an expert Python developer...",
+  "model": "gpt-4",
+  "framework": "opencode"
+}}
 {"name": "set_persona", "arguments": {"name": "coder"}}
 {"name": "get_persona", "arguments": {}}
-{"name": "set_people_map", "arguments": {"map": {"Alex": "Alexander"}}}
+{"name": "get_persona_character", "arguments": {"name": "coder"}}
+{"name": "list_personas", "arguments": {}}
+{"name": "delete_persona", "arguments": {"name": "coder"}}
+```
+
+**People map** — associates name variants with canonical names for entity resolution:
+```python
+d.set_people_map({"Alex": "Alexander", "Sasha": "Alexander", "Beth": "Elizabeth"})
 ```
 
 Persona state is persisted in `~/.alt-memory/persona.json`. Switching persona doesn't delete or hide other realms — it just provides a convenient scoped identity for the active session.

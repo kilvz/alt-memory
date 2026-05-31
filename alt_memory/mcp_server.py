@@ -787,29 +787,81 @@ def _build_tool_definitions() -> list[dict]:
         },
         {
             "name": "get_persona",
-            "description": "Get the current active persona name",
+            "description": "Get the current active persona with full character definition",
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
             "name": "set_persona",
-            "description": "Set the active persona, creating a persona_<name> realm if needed",
+            "description": "Set the active persona with optional character definition. Creates a persona_<name> realm. If the persona already exists, existing fields are preserved unless overridden.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Persona name"},
+                    "name": {"type": "string", "description": "Persona name (e.g. donald_trump)"},
+                    "system_prompt": {"type": "string", "description": "Character system prompt defining personality/behavior"},
+                    "description": {"type": "string", "description": "Short description of the persona"},
+                    "model": {"type": "string", "description": "Preferred LLM model"},
+                    "framework": {"type": "string", "description": "Agent framework (e.g. eternalai, eliza)"},
+                    "metadata": {"type": "object", "description": "Optional extensible metadata"},
                 },
                 "required": ["name"],
             },
         },
         {
             "name": "switch_persona",
-            "description": "Alias for set_persona — switch to a different active persona",
+            "description": "Alias for set_persona — switch to a different active persona with optional character definition",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Persona name"},
+                    "system_prompt": {"type": "string", "description": "Character system prompt"},
+                    "description": {"type": "string", "description": "Short description"},
+                    "model": {"type": "string", "description": "Preferred LLM model"},
+                    "framework": {"type": "string", "description": "Agent framework"},
+                    "metadata": {"type": "object", "description": "Optional metadata"},
                 },
                 "required": ["name"],
+            },
+        },
+        {
+            "name": "create_persona",
+            "description": "Create a new persona character definition without activating it. Raises error if name already exists.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Unique persona name"},
+                    "system_prompt": {"type": "string", "description": "Character system prompt defining personality/behavior"},
+                    "description": {"type": "string", "description": "Short description"},
+                    "model": {"type": "string", "description": "Preferred LLM model"},
+                    "framework": {"type": "string", "description": "Agent framework"},
+                    "metadata": {"type": "object", "description": "Optional metadata"},
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "list_personas",
+            "description": "List all registered persona character definitions",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "delete_persona",
+            "description": "Remove a persona character definition from the registry (does not delete its realm or entities)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Persona name to delete"},
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "get_persona_character",
+            "description": "Get the system prompt character definition for a persona (active by default)",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Persona name (omit for active persona)"},
+                },
             },
         },
         {
@@ -984,6 +1036,10 @@ class MCPServer:
         self._register("get_persona", self._get_persona, [])
         self._register("set_persona", self._set_persona, ["name"])
         self._register("switch_persona", self._switch_persona, ["name"])
+        self._register("create_persona", self._create_persona, ["name"])
+        self._register("list_personas", self._list_personas, [])
+        self._register("delete_persona", self._delete_persona, ["name"])
+        self._register("get_persona_character", self._get_persona_character, [])
         self._register("import_entities", self._import_entities, ["entities"])
         self._register("export_collection", self._export_collection, [])
 
@@ -1531,14 +1587,48 @@ class MCPServer:
         return {"deleted": count}
 
     def _get_persona(self, params: dict) -> dict:
-        return {"persona": self.dim.get_persona()}
+        return self.dim.get_persona()
 
     def _set_persona(self, params: dict) -> dict:
-        result = self.dim.set_persona(params["name"])
-        return result
+        return self.dim.set_persona(
+            params["name"],
+            system_prompt=params.get("system_prompt"),
+            description=params.get("description"),
+            model=params.get("model"),
+            framework=params.get("framework"),
+            metadata=params.get("metadata"),
+        )
 
     def _switch_persona(self, params: dict) -> dict:
-        return self.dim.switch_persona(params["name"])
+        return self.dim.switch_persona(
+            params["name"],
+            system_prompt=params.get("system_prompt"),
+            description=params.get("description"),
+            model=params.get("model"),
+            framework=params.get("framework"),
+            metadata=params.get("metadata"),
+        )
+
+    def _create_persona(self, params: dict) -> dict:
+        return self.dim.create_persona(
+            params["name"],
+            system_prompt=params.get("system_prompt", ""),
+            description=params.get("description", ""),
+            model=params.get("model", ""),
+            framework=params.get("framework", ""),
+            metadata=params.get("metadata"),
+        )
+
+    def _list_personas(self, params: dict) -> dict:
+        return {"personas": self.dim.list_personas()}
+
+    def _delete_persona(self, params: dict) -> dict:
+        ok = self.dim.delete_persona(params["name"])
+        return {"deleted": ok}
+
+    def _get_persona_character(self, params: dict) -> dict:
+        prompt = self.dim.get_persona_character(name=params.get("name"))
+        return {"system_prompt": prompt}
 
     def _import_entities(self, params: dict) -> dict:
         count = self.dim.import_entities(

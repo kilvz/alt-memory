@@ -1570,54 +1570,244 @@ class Dimension:
         ids = self.batch_add_entities(batch)
         return len(ids)
 
-    # ---- Persona -------------------------------------------------------------
+    # ---- Persona (character definition model) ----------------------------------
+    #
+    # A persona is a character definition — system prompt + metadata — that
+    # defines how an AI agent behaves. Modeled after Eternal AI's on-chain
+    # agent persona (system prompt file minted as ERC-721).
+    #
+    # persona.json stores both the active persona name and the registry of
+    # all defined persona characters:
+    #
+    #   {
+    #     "active": "donald_trump",
+    #     "personas": {
+    #       "donald_trump": {
+    #         "name": "donald_trump",
+    #         "system_prompt": "Act as if you are Donald Trump...",
+    #         "description": "A Donald Trump twin agent",
+    #         "model": "DeepSeek-R1-Distill-Llama-70B",
+    #         "framework": "eternalai",
+    #         "metadata": {}
+    #       }
+    #     }
+    #   }
+    #
+    # Legacy format {"persona": "name"} is auto-upgraded on read.
 
-    def get_persona(self) -> str:
-        """Return the current active persona name, or empty string if unset."""
+    def get_persona(self) -> dict:
+        """Return the current active persona dict, or ``{"name": ""}`` if unset."""
         return _get_dimension_persona(str(self._base))
 
-    def set_persona(self, name: str) -> dict:
-        """Set the active persona. Creates a ``persona_<name>`` realm if needed."""
+    def set_persona(
+        self,
+        name: str,
+        system_prompt: str | None = None,
+        description: str | None = None,
+        model: str | None = None,
+        framework: str | None = None,
+        metadata: dict | None = None,
+    ) -> dict:
+        """Set the active persona.
+
+        Creates a ``persona_<name>`` realm if needed and saves the character
+        definition to ``persona.json``. If the persona already exists in the
+        registry, its existing definition is used unless overrides are given.
+
+        Args:
+            name: Unique persona identifier (e.g. ``"donald_trump"``).
+            system_prompt: The character system prompt defining behavior.
+            description: Short description of this persona.
+            model: Preferred LLM model for this persona.
+            framework: Agent framework (e.g. ``"eternalai"``, ``"eliza"``).
+            metadata: Optional extensible metadata dict.
+
+        Returns:
+            Dict with the full persona definition.
+        """
         if not name or not name.strip():
             raise ValueError("persona name must be non-empty")
         name = _sanitize(name, "name")
+
+        # Load existing registry, upgrade legacy format
+        registry = _load_persona_registry(str(self._base))
+
+        existing = registry.get("personas", {}).get(name, {})
+        persona = {
+            "name": name,
+            "system_prompt": system_prompt if system_prompt is not None
+                             else existing.get("system_prompt", ""),
+            "description": description if description is not None
+                           else existing.get("description", ""),
+            "model": model if model is not None
+                     else existing.get("model", ""),
+            "framework": framework if framework is not None
+                         else existing.get("framework", ""),
+            "metadata": metadata if metadata is not None
+                        else existing.get("metadata", {}),
+        }
+
+        # Ensure realm exists
         self.get_or_create_realm(f"persona_{name}", f"Persona: {name}")
-        _set_dimension_persona(str(self._base), name)
-        return {"persona": name}
 
-    def switch_persona(self, name: str) -> dict:
+        # Save updated registry
+        _save_persona_registry(str(self._base), name, persona)
+
+        return {k: v for k, v in persona.items()}
+
+    def switch_persona(self, name: str, **kwargs) -> dict:
         """Alias for ``set_persona``."""
-        return self.set_persona(name)
+        return self.set_persona(name, **kwargs)
+
+    def create_persona(
+        self,
+        name: str,
+        system_prompt: str = "",
+        description: str = "",
+        model: str = "",
+        framework: str = "",
+        metadata: dict | None = None,
+    ) -> dict:
+        """Create a new persona character definition without activating it.
+
+        Same fields as ``set_persona`` but does NOT switch the active persona.
+        If the persona name already exists, raises ValueError.
+        """
+        if not name or not name.strip():
+            raise ValueError("persona name must be non-empty")
+        name = _sanitize(name, "name")
+
+        registry = _load_persona_registry(str(self._base))
+        if name in registry.get("personas", {}):
+            raise ValueError(f"persona '{name}' already exists — use set_persona to update")
+
+        persona = {
+            "name": name,
+            "system_prompt": system_prompt or "",
+            "description": description or "",
+            "model": model or "",
+            "framework": framework or "",
+            "metadata": metadata or {},
+        }
+
+        self.get_or_create_realm(f"persona_{name}", f"Persona: {name}")
+        _save_persona_registry(str(self._base), None, persona)
+        return {k: v for k, v in persona.items()}
+
+    def list_personas(self) -> list[dict]:
+        """List all registered persona character definitions."""
+        registry = _load_persona_registry(str(self._base))
+        personas = registry.get("personas", {})
+        active = registry.get("active", "")
+        result = []
+        for pname, pdata in personas.items():
+            entry = dict(pdata)
+            entry["active"] = pname == active
+            result.append(entry)
+        return result
+
+    def delete_persona(self, name: str) -> bool:
+        """Remove a persona character definition from the registry.
+
+        Does NOT delete the ``persona_<name>`` realm or its entities.
+        Returns True if the persona existed and was removed.
+        """
+        registry = _load_persona_registry(str(self._base))
+        if name not in registry.get("personas", {}):
+            return False
+        del registry["personas"][name]
+        if registry.get("active") == name:
+            registry["active"] = ""
+        _save_persona_registry_raw(str(self._base), registry)
+        _clear_persona_cache(str(self._base))
+        return True
+
+    def get_persona_character(self, name: str | None = None) -> str:
+        """Get the system prompt for a persona.
+
+        Args:
+            name: Persona name. If None, uses the active persona.
+
+        Returns:
+            The system prompt string, or empty string if not found.
+        """
+        if name is None:
+            active = self.get_persona()
+            name = active.get("name", "")
+            if not name:
+                return ""
+        registry = _load_persona_registry(str(self._base))
+        persona = registry.get("personas", {}).get(name, {})
+        return persona.get("system_prompt", "")
 
 
-_DIMENSION_PERSONA_CACHE: dict[str, str] = {}
+_DIMENSION_PERSONA_CACHE: dict[str, dict] = {}
 _persona_cache_lock = threading.Lock()
 
 
-def _get_dimension_persona(dim_path: str) -> str:
+def _load_persona_registry(dim_path: str) -> dict:
+    """Load the persona registry, upgrading legacy format if needed."""
+    cfg_path = Path(dim_path) / "persona.json"
+    try:
+        data = json.loads(cfg_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {"active": "", "personas": {}}
+
+    # Upgrade legacy {"persona": "name"} format
+    if "persona" in data and "personas" not in data:
+        old_name = data.get("persona", "")
+        upgraded = {"active": old_name, "personas": {}}
+        if old_name:
+            upgraded["personas"][old_name] = {
+                "name": old_name,
+                "system_prompt": "",
+                "description": "",
+                "model": "",
+                "framework": "",
+                "metadata": {},
+            }
+        cfg_path.write_text(json.dumps(upgraded, indent=2))
+        return upgraded
+
+    if "active" not in data:
+        data["active"] = ""
+    if "personas" not in data:
+        data["personas"] = {}
+    return data
+
+
+def _save_persona_registry(dim_path: str, active_name: str | None, persona: dict) -> None:
+    """Save a persona to the registry and optionally set it as active."""
+    registry = _load_persona_registry(dim_path)
+    pname = persona["name"]
+    registry.setdefault("personas", {})[pname] = persona
+    if active_name is not None:
+        registry["active"] = active_name
+    _save_persona_registry_raw(dim_path, registry)
+    _clear_persona_cache(dim_path)
+
+
+def _save_persona_registry_raw(dim_path: str, registry: dict) -> None:
+    cfg_path = Path(dim_path) / "persona.json"
+    cfg_path.write_text(json.dumps(registry, indent=2))
+
+
+def _clear_persona_cache(dim_path: str) -> None:
+    with _persona_cache_lock:
+        _DIMENSION_PERSONA_CACHE.pop(dim_path, None)
+
+
+def _get_dimension_persona(dim_path: str) -> dict:
     with _persona_cache_lock:
         cached = _DIMENSION_PERSONA_CACHE.get(dim_path)
         if cached is not None:
             return cached
-    cfg_path = Path(dim_path) / "persona.json"
-    try:
-        data = json.loads(cfg_path.read_text())
-        name = data.get("persona", "")
-        with _persona_cache_lock:
-            _DIMENSION_PERSONA_CACHE[dim_path] = name
-        return name
-    except FileNotFoundError:
-        pass
-    except (json.JSONDecodeError, OSError):
-        pass
-    return ""
-
-
-def _set_dimension_persona(dim_path: str, name: str) -> None:
-    cfg_path = Path(dim_path) / "persona.json"
-    cfg_path.write_text(json.dumps({"persona": name}, indent=2))
+    registry = _load_persona_registry(dim_path)
+    active_name = registry.get("active", "")
+    persona = registry.get("personas", {}).get(active_name, {})
     with _persona_cache_lock:
-        _DIMENSION_PERSONA_CACHE[dim_path] = name
+        _DIMENSION_PERSONA_CACHE[dim_path] = persona
+    return persona if persona else {"name": ""}
 
 
 # ==================== Closet-line entity extraction (for record_ingest) ====================

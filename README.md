@@ -2,26 +2,29 @@
 
 **Local-first persistent memory for AI agents.** Store, search, and manage structured memory with hybrid vector/keyword search, a knowledge graph, agent diaries, and an MCP server — all offline, no external services.
 
-```
+```bash
 pip install alt-memory
 ```
 
 ---
 
-## Features
+## Quick Summary
 
-- **Hybrid search** — vector similarity + FTS5 keyword matching with configurable ranking
-- **Dual vector backends** — FAISS (default, fast) or ChromaDB (HNSW, optional)
-- **Auto-picking embedder** — uses best available: sentence-transformers → pure numpy BERT → TF-IDF+SVD
-- **Swappable embedders** — switch at runtime between numpy, ONNX MiniLM, BERT, Gemma, spaCy
-- **Knowledge graph** — temporal entity-relationship triples with invalidation timelines
-- **Agent diaries** — per-agent temporal records with L0/L1/L2 memory layers
-- **File mining** — auto-extract entities from code, conversations, text
-- **MCP server** — 40+ JSON-RPC tools over stdio/SSE for AI agent integration
-- **Palace graph** — cross-realm tunnels with graph traversal
-- **Personas** — isolated memory realms per AI persona
-- **i18n** — 14 languages for agent-facing communication
-- **Docker** — official images on Docker Hub (`kilv/alt-memory`)
+| Feature | What it does |
+|---------|-------------|
+| **Dimension** | A directory on disk containing SQLite + FAISS/Chroma + config — your persistent memory store |
+| **Realms** | Top-level buckets (e.g., `work`, `personal`, `agent_claude`), like databases |
+| **Domains** | Categories within a realm (e.g., `bugs`, `ideas`, `code`), like tables |
+| **Entities** | Individual memory items with content + metadata |
+| **KG facts** | Relationship triples (`subject → predicate → object`) with temporal validity |
+| **Nodes** | Cross-reference entries connecting source files to entity references |
+| **Tunnels** | Cross-realm links between domains (the "palace graph") |
+| **Records** | Per-agent temporal diary entries |
+| **AAAK** | Compressed memory format for efficient storage |
+
+All search is **hybrid** by default — vector similarity + FTS5 keyword matching. 40+ MCP tools, all local, no cloud.
+
+Benchmarked at ~8ms/tool (FAISS backend, numpy embedder) — roughly 7x faster than the predecessor system.
 
 ---
 
@@ -55,24 +58,43 @@ Requirements: Python ≥ 3.10, Windows/Linux/macOS.
 ## Quick Start — CLI
 
 ```bash
-# Initialize
+# Initialize a new dimension
 alt-memory init
 
-# Store a memory
+# Check status
+alt-memory status
+
+# Store a memory (realm=work, domain=bugs)
 alt-memory add --realm work --domain bugs --content "Login freezes on Safari 18.2"
 
-# Search (hybrid by default)
+# Search — hybrid by default (vector + keyword)
 alt-memory search "login safari" --limit 5
 
-# Add a knowledge graph fact
+# Browse
+alt-memory list --realm work
+alt-memory realms
+alt-memory rooms
+
+# Knowledge graph
 alt-memory kg-add --subject LoginBug --predicate affects --object Safari
 alt-memory kg-query LoginBug
+alt-memory kg-stats
 
-# Write a diary entry
+# Agent diary
 alt-memory record --agent claude --entry "Investigated the Safari freeze"
 
-# Run the MCP server
+# Mine a file (auto-chunk, extract entities)
+alt-memory mine --realm work --domain code src/auth.py
+
+# MCP server
 alt-memory mcp --transport stdio
+```
+
+### Init with project detection
+
+```bash
+# Run init in a project directory — auto-detects corpus origin, entities, domains
+alt-memory init /path/to/project --llm-provider ollama --llm-model qwen2.5
 ```
 
 ---
@@ -145,8 +167,8 @@ d.set_backend("faiss")  # hot-swap
 ## MCP Server (AI Agent Integration)
 
 ```bash
-alt-memory mcp --transport stdio          # for AI coding agents
-alt-memory mcp --transport sse --port 8316  # HTTP
+alt-memory mcp --transport stdio          # for AI coding agents (stdio)
+alt-memory mcp --transport sse --port 8316  # HTTP SSE mode
 ```
 
 The server exposes 40+ JSON-RPC tools for memory operations. Configure it in your AI agent's MCP settings:
@@ -162,22 +184,64 @@ The server exposes 40+ JSON-RPC tools for memory operations. Configure it in you
 }
 ```
 
-### Key MCP tools
+### All MCP Tools
 
-| Tool | Description |
-|------|-------------|
-| `search` | Hybrid/vector/keyword search |
-| `add_entity` / `get_entity` / `update_entity` / `delete_entity` | CRUD |
-| `set_backend` / `get_backend` | Backend control |
-| `set_embedder` / `get_default_embedder` | Embedder control |
-| `kg_add` / `kg_query` / `kg_invalidate` / `kg_stats` | Knowledge graph |
-| `record_write` / `record_read` | Agent diaries |
-| `mine_file` / `mine_text` | File mining |
-| `list_realms` / `list_domains` | Browsing |
-| `traverse` / `graph_stats` / `get_taxonomy` | Palace graph |
-| `sync` / `check_duplicate` | Maintenance |
-
-Full list: `alt-memory mcp --help` or inspect via `tools/list` after connecting.
+| Category | Tool | Description |
+|----------|------|-------------|
+| **Search** | `search` | Hybrid/vector/keyword search across the dimension |
+| | `check_duplicate` | Check if content already exists (similarity threshold) |
+| **CRUD** | `add_entity` | Add a new entity to a realm/domain |
+| | `get_entity` | Get entity by ID |
+| | `update_entity` | Update content, metadata, realm, or domain |
+| | `delete_entity` | Delete a single entity |
+| | `delete_entities` | Bulk delete by IDs |
+| | `list_entities` | List with pagination and realm/domain filter |
+| | `batch_add_entities` | Add multiple entities in one transaction |
+| **Realms** | `create_realm` | Create a new top-level bucket |
+| | `delete_realm` | Delete realm and all its domains/entities |
+| | `list_realms` | List all realms |
+| | `get_taxonomy` | Full realm → domain → entity count hierarchy |
+| | `get_status` | Entity count, realm/domain breakdown, embedder info |
+| **Domains** | `create_domain` | Create a new domain in a realm |
+| | `delete_domain` | Delete a domain |
+| | `list_domains` | List domains (optionally filtered by realm) |
+| **KG** | `kg_add` | Add a fact (subject → predicate → object) |
+| | `kg_query` | Query facts about an entity |
+| | `kg_invalidate` | Mark a fact as no longer true |
+| | `kg_stats` | KG statistics |
+| | `kg_timeline` | Chronological timeline of facts |
+| **Records** | `record_write` | Write a temporal entry for an agent |
+| | `record_read` | Read recent entries for an agent |
+| | `list_agents` | List all agents with records |
+| **Graph** | `create_tunnel` | Link two domains across realms |
+| | `delete_tunnel` | Delete a tunnel |
+| | `list_tunnels` | List all tunnels |
+| | `find_tunnels` | Find bridges between two realms |
+| | `follow_tunnels` | Follow tunnels from a domain |
+| | `traverse` | Walk the palace graph from a domain |
+| | `graph_stats` | Overview of tunnel connections |
+| **Backend** | `set_backend` | Switch between FAISS and ChromaDB |
+| | `get_backend` | Get current backend |
+| **Embedder** | `set_embedder` | Switch embedding model (auto-reindex) |
+| | `get_default_embedder` | Get default embedder config |
+| **Mine** | `mine_file` | Mine a single file into the dimension |
+| | `mine_text` | Mine text content directly |
+| | `batch_mine` | Mine all matching files in a directory |
+| | `sync` | Prune entities whose source files were deleted |
+| **Import/Export** | `import_entities` | Import from JSON list |
+| | `export_collection` | Export all entities as JSON |
+| **AAAK** | `aaak_compress` | Compress text to AAAK format |
+| | `aaak_decompress` | Decompress AAAK text |
+| | `aaak_parse` | Parse a single AAAK entry |
+| | `get_aaak_spec` | Get the AAAK dialect spec |
+| **Persona** | `get_persona` | Get current active persona |
+| | `set_persona` | Switch to a persona (creates persona_<name> realm) |
+| | `get_people_map` | Get name variant → canonical mappings |
+| | `set_people_map` | Set name variant mappings |
+| **Hooks** | `hook_settings` | Configure silent_save and desktop_toast |
+| | `memories_filed_away` | Check if recent checkpoint was saved |
+| **Maintenance** | `rebuild_fts` | Rebuild FTS5 full-text search index |
+| | `reconnect` | Force reconnect to dimension database |
 
 ---
 
@@ -215,24 +279,6 @@ d.sync(project_dir="/path/to/repo", apply=True)
 
 ---
 
-## Docker
-
-```bash
-# FAISS + numpy BERT (Alpine, ~117MB content)
-docker run -v ~/.alt-memory:/root/.alt-memory kilv/alt-memory:alpine mcp
-
-# Full install (Debian, includes chroma + onnx)
-docker run -v ~/.alt-memory:/root/.alt-memory kilv/alt-memory:latest mcp
-```
-
-Tags:
-- `kilv/alt-memory:latest` — Debian-based, full install
-- `kilv/alt-memory:4.5.0` — versioned Debian
-- `kilv/alt-memory:alpine` — Alpine-based, FAISS + numpy BERT (~117MB)
-- `kilv/alt-memory:4.5.0-alpine` — versioned Alpine
-
----
-
 ## Architecture
 
 ```
@@ -251,42 +297,169 @@ Tags:
 └──────────────────────────────────────────────┘
 ```
 
-Each dimension is a directory on disk:
+### On-disk layout
+
 ```
 ~/.alt-memory/
-├── entities.db           # SQLite + FTS5
-├── index.faiss           # FAISS vector index (or chroma/)
-├── dimension.json        # config (backend, embedder)
-├── nodes/                # packed entity storage
-├── entity_registry.json  # entity name → ID mappings
-└── knowledge_graph.json  # relationship store
+├── entities.db           # SQLite + FTS5 (all content, metadata, KG)
+├── index.faiss           # FAISS vector index (or chroma/ directory)
+├── dimension.json        # Config (backend, embedder, model settings)
+├── nodes/                # Packed cross-reference node storage
+├── entity_registry.json  # Entity name → ID mappings
+├── knowledge_graph.json  # Relationship store (backup/sync)
+└── aaak_cache.json       # AAAK compression cache
+```
+
+All data is portable — copy `~/.alt-memory` to another machine and it works.
+
+---
+
+## Key Concepts
+
+### Organization
+
+| Concept | What it is | MCP tool prefix | SQL analogy |
+|---------|-----------|----------------|-------------|
+| **Dimension** | Top-level memory store | (implicit) | "database server" |
+| **Realm** | Top-level bucket | `*_realm` | database |
+| **Domain** | Category within a realm | `*_domain` | table |
+| **Entity** | A stored memory item | `*_entity` | row |
+| **Node** | Cross-reference: source file → entity refs | `add_node` / `*_node` | index |
+| **KG fact** | Relationship triple | `kg_*` | edge |
+| **Tunnel** | Cross-realm link between domains | `*_tunnel` | foreign key |
+| **Record** | Per-agent temporal entry | `record_*` | log |
+| **Persona** | Isolated realm per AI persona | `*_persona` | schema |
+
+### AAAK Memory Compression
+
+AAAK is a compressed memory dialect for efficient storage — readable by humans and LLMs without decoding. Uses 3-letter entity codes, emotion markers, pipe-separated fields, and importance ratings.
+
+```bash
+# Compress a memory
+alt-memory aaak "Alice loves Jordan, they have two kids: Riley (18, into sports) and Max (11, does chess and swimming)"
+
+# Output
+FAM: ALC→♡JOR | 2D(kids): RIL(18,sports) MAX(11,chess+swimming) | ★★★★
+```
+
+Use in MCP:
+```json
+{"name": "aaak_compress", "arguments": {"text": "Your long text here"}}
+{"name": "get_aaak_spec", "arguments": {}}
+```
+
+### File Mining
+
+```bash
+# Mine a single file
+alt-memory mine src/auth.py --realm myproject --domain code
+
+# Mine a directory (auto-globs common file types)
+alt-memory mine /path/to/project --mode projects
+
+# Preview without filing
+alt-memory mine /path/to/project --dry-run
+
+# Batch mine via MCP
+{"name": "batch_mine", "arguments": {"directory": "/path/to/project", "realm": "myproject"}}
+```
+
+Mining auto-chunks long files, extracts entities, and stores them with source file references.
+
+### Sync & Maintenance
+
+```bash
+# Dry-run: see what would be pruned
+alt-memory sync --project-dir /path/to/repo
+
+# Actually prune stale entities
+alt-memory sync --project-dir /path/to/repo --apply
+
+# Repair tools
+alt-memory repair --integrity          # Check SQLite integrity
+alt-memory repair --vacuum             # VACUUM
+alt-memory repair --rebuild-fts        # Rebuild FTS5 index
+
+# Full repair (reset corrupted state)
+alt-memory migrate --rebuild-faiss     # Rebuild FAISS from SQLite
+```
+
+### Agent Diaries (L0/L1/L2 Memory Layers)
+
+Records are the "temporal" memory layer — per-agent, ordered, searchable:
+
+```python
+# Layer 0 — immediate record (this session)
+d.diary_write("claude", "DEBUG: found race condition in auth retry", topic="debug")
+
+# Layer 1 — daily summary (end of session)
+d.diary_write("claude", "SESSION:2026-05-31|fixed.auth.race.cond|★★★", topic="summary")
+
+# Layer 2 — project-level patterns (weekly)
+d.diary_write("claude", "PATTERN: auth.timeouts.peak→rate.limit.insufficient|★★★★★", topic="pattern")
+```
+
+Read with:
+```bash
+alt-memory wake-up --agent claude --last-n 5
 ```
 
 ---
 
-## CLI Reference
+## Docker
+
+```bash
+# FAISS + numpy BERT (Alpine, ~117MB content)
+docker run -v ~/.alt-memory:/root/.alt-memory kilv/alt-memory:alpine mcp
+
+# Full install (Debian, includes chroma + onnx)
+docker run -v ~/.alt-memory:/root/.alt-memory kilv/alt-memory:latest mcp
+```
+
+Tags:
+- `kilv/alt-memory:latest` — Debian-based, full install
+- `kilv/alt-memory:4.5.1` — versioned Debian
+- `kilv/alt-memory:alpine` — Alpine-based, FAISS + numpy BERT (~117MB)
+- `kilv/alt-memory:4.5.1-alpine` — versioned Alpine
+
+---
+
+## CLI Reference (Full)
 
 ```
-alt-memory init                  Initialize a new dimension
-alt-memory status                Show dimension status
-alt-memory add -w <realm> -r <domain> -c <content>
-alt-memory search <query>        Search (hybrid default)
-alt-memory get <id>              Get entity by ID
-alt-memory list                  List entities
-alt-memory realms                List realms
-alt-memory rooms                 List domains
-alt-memory delete <id>           Delete entity
-alt-memory kg-add --subject --predicate --object
-alt-memory kg-query <entity>     Query knowledge graph
-alt-memory kg-invalidate ...     Invalidate KG fact
-alt-memory kg-stats              KG statistics
-alt-memory record --agent --entry
-alt-memory record-read --agent   Read diary
-alt-memory mine -w <realm> -r <domain> <file>
-alt-memory sync [--apply]        Prune stale entities
-alt-memory mcp                   Run MCP server
-alt-memory repair                Repair utilities
-alt-memory aaak <text>           AAAK compression
+alt-memory init [dir]              Initialize dimension (optionally scan project)
+alt-memory status                  Show dimension status (JSON)
+alt-memory add -w <realm> -r <domain> -c <content>  Add entity
+alt-memory search <query>          Search (hybrid default, use --mode flag)
+alt-memory get <id>                Get entity by ID
+alt-memory list [--realm] [--domain]  List entities
+alt-memory realms [--verbose]      List realms
+alt-memory rooms [--realm]         List domains
+alt-memory delete <id>             Delete entity
+
+alt-memory kg-add --subject <s> --predicate <p> --object <o>  Add KG fact
+alt-memory kg-query [entity]       Query KG
+alt-memory kg-invalidate --subject <s> --predicate <p> --object <o>  Invalidate
+alt-memory kg-stats                KG statistics
+
+alt-memory record --agent <a> --entry <e>  Write diary entry
+alt-memory record-read --agent <a>   Read diary entries
+alt-memory record-ingest --dir <d>   Ingest daily summary files
+
+alt-memory mine <file|dir>         Mine files into dimension
+alt-memory sync [--apply]          Prune stale entities
+alt-memory check-dup <content>     Check for duplicates
+alt-memory rebuild-fts             Rebuild FTS index
+
+alt-memory mcp --transport stdio   Run MCP server
+alt-memory repair [--vacuum] [--rebuild-fts]  Repair utilities
+alt-memory migrate [--rebuild-faiss]   Schema migration
+alt-memory aaak <text>             AAAK compression
+alt-memory split [--source]        Split mega-files into sessions
+
+alt-memory hook run --hook <h> --harness <h>  Run hook (claude-code/codex)
+alt-memory instructions <topic>    Output skill instructions
+alt-memory wake-up [--agent]       L0+L1 wake-up context
 ```
 
 ---

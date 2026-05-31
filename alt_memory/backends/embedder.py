@@ -539,7 +539,12 @@ class OnnxEmbedder:
         # Some ONNX exports include token_type_ids as a required input
         if self._input_names and "token_type_ids" in self._input_names:
             feed_dict["token_type_ids"] = np.zeros_like(encs["input_ids"])
-        outputs = self._session.run(None, feed_dict)
+        try:
+            outputs = self._session.run(None, feed_dict)
+        except Exception as exc:
+            raise RuntimeError(
+                f"ONNX Runtime inference failed for model '{self._model_name}': {exc}"
+            ) from exc
         # last_hidden_state mean pooling
         token_emb = outputs[0]
         mask = encs["attention_mask"][:, :, np.newaxis].astype(np.float32)
@@ -566,15 +571,8 @@ class OnnxEmbedder:
                 ) from e
 
             model_id = f"sentence-transformers/{self._model_name}"
-            try:
-                from optimum.onnxruntime import ORTModelForFeatureExtraction
-
-                self._session = ORTModelForFeatureExtraction.from_pretrained(
-                    model_id, export=True, provider=self._providers[0]
-                )
-                self._session = self._session.session
-            except ImportError:
-                self._session = self._load_direct_onnx(model_id, ort, np)
+            # Direct ONNX load from HuggingFace hub — no PyTorch/optimum needed
+            self._session = self._load_direct_onnx(model_id, ort, np)
 
             self._tokenizer = AutoTokenizer.from_pretrained(model_id)
             self._input_names = [inp.name for inp in self._session.get_inputs()]

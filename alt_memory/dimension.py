@@ -1,6 +1,7 @@
 """Alt Memory v4 — FAISS-powered dimension with realms, domains, entities, hybrid search, entity graph, nodes."""
 
 import contextlib
+import copy
 import json
 import logging
 import os
@@ -524,6 +525,8 @@ class Dimension:
         model = self._resolve_embedder(model, config_path)
         if device is None:
             device = embedding_device
+        if device is None or device == "auto":
+            device = "cpu"
         return get_embedder(model=model, model_dir=str(self._data_dir), device=device)
 
     @staticmethod
@@ -560,8 +563,10 @@ class Dimension:
             try:
                 import onnxruntime
                 onnxruntime
+                from transformers import AutoTokenizer
+                AutoTokenizer
             except ImportError:
-                logger.warning("onnxruntime not installed for %s — falling back to numpy", model)
+                logger.warning("onnxruntime or transformers not installed for %s — falling back to numpy", model)
                 model = "numpy"
         if model == "numpy" and config_path.exists():
             with open(config_path) as f:
@@ -1122,7 +1127,13 @@ class Dimension:
                 return query
         if any(t.startswith('"') for t in tokens):
             return query
-        return " AND ".join(t + "*" for t in tokens)
+        expanded = []
+        for t in tokens:
+            if "-" in t:
+                expanded.extend(t.split("-"))
+            else:
+                expanded.append(t)
+        return " AND ".join(t + "*" for t in expanded)
 
     def _hybrid_search(self, query: str, n_results: int = 10,
                         realm: Optional[str] = None, domain: Optional[str] = None) -> list[SearchResult]:
@@ -1381,18 +1392,26 @@ class Dimension:
             )
 
         with self._lock:
-            # Write new config
             config_path = self._base / "dimension.json"
             config = {}
             if config_path.exists():
                 with open(config_path) as f:
                     config = json.load(f)
+            old_config = copy.deepcopy(config)
             config["embedding"] = config_name
             with open(config_path, "w") as f:
                 json.dump(config, f)
 
-            # Load new embedder
-            self._embedder = self._load_embedder(device=device)
+            # Save old embedder for rollback
+            old_embedder = self._embedder
+
+            try:
+                self._embedder = self._load_embedder(device=device)
+            except Exception:
+                self._embedder = old_embedder
+                with open(config_path, "w") as f:
+                    json.dump(old_config, f)
+                raise
 
             info = {
                 "model": config_name,
@@ -1400,7 +1419,29 @@ class Dimension:
             }
 
             if reindex:
-                count = self._reindex_embeddings()
+                try:
+                    count = self._reindex_embeddings()
+                except Exception as exc:
+                    err_str = str(exc)
+                    if "ONNX" in err_str or "bad allocation" in err_str.lower():
+                        logger.warning(
+                            "ONNX Runtime failed during reindex (%s) — "
+                            "falling back to numpy embedder",
+                            err_str[:120],
+                        )
+                        config["embedding"] = old_config.get("embedding", "numpy_tfidf_svd")
+                        with open(config_path, "w") as f:
+                            json.dump(config, f)
+                        self._embedder = self._load_embedder(device=device)
+                        count = self._reindex_embeddings()
+                        info["reindexed"] = count
+                        info["fallback"] = "numpy"
+                        info["fallback_reason"] = err_str[:200]
+                    else:
+                        self._embedder = old_embedder
+                        with open(config_path, "w") as f:
+                            json.dump(old_config, f)
+                        raise
                 info["reindexed"] = count
             else:
                 logger.warning(

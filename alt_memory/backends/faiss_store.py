@@ -51,10 +51,16 @@ class FaissStore:
                 self.index = loaded
             else:
                 logger.info(
-                    "Wrapping legacy IndexFlatIP in IndexIDMap (%d vectors)",
+                    "Wrapping legacy index in IndexIDMap (%d vectors, type=%s)",
                     loaded.ntotal,
+                    type(loaded).__name__,
                 )
-                self.index = faiss.IndexIDMap(loaded)
+                new_index = faiss.IndexIDMap(faiss.IndexFlatIP(self.dimension))
+                if loaded.ntotal > 0:
+                    vectors = loaded.reconstruct_n(0, loaded.ntotal)
+                    ids = np.arange(loaded.ntotal, dtype=np.int64)
+                    new_index.add_with_ids(vectors, ids)
+                self.index = new_index
             logger.info("Loaded FAISS index with %d vectors", self.index.ntotal)
         else:
             self.index = faiss.IndexIDMap(faiss.IndexFlatIP(dimension))

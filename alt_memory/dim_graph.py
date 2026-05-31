@@ -100,9 +100,10 @@ def build_graph(dimension=None, config=None):
         domain_data = defaultdict(lambda: {"realms": set(), "gates": set(), "count": 0, "dates": set()})
 
         for row in rows:
-            meta = json.loads(row["metadata"] or "{}")
-            domain = row["domain"] or meta.get("domain", "")
-            realm = row["realm"] or meta.get("realm", "")
+            row_id, row_realm, row_domain, row_meta = row
+            meta = json.loads(row_meta or "{}")
+            domain = row_domain or meta.get("domain", "")
+            realm = row_realm or meta.get("realm", "")
             gate = meta.get("gate", "")
             date = meta.get("date", "")
             if domain and domain != "general" and realm:

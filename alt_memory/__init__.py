@@ -53,9 +53,7 @@ from alt_memory.general_extractor import extract_memories
 from alt_memory.layers import MemoryStack
 from alt_memory.migrate import (
     get_dimension_version,
-    migrate,
     migrate_schema,
-    rebuild_faiss,
     set_dimension_version,
 )
 from alt_memory.miner import (
@@ -131,7 +129,6 @@ __all__ = [
     "initialize_dynamics_fields",
     "is_claude_projects_root",
     "list_tunnels",
-    "migrate",
     "migrate_schema",
     "mine_code_file",
     "mine_conversation",
@@ -141,7 +138,6 @@ __all__ = [
     "normalize",
     "potentiate",
     "quick_setup",
-    "rebuild_faiss",
     "run_onboarding",
     "sanitize_content",
     "sanitize_name",

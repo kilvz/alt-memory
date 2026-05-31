@@ -128,10 +128,10 @@ def _classify_entity(
 def _iter_entity_metadata(dimension, realm: Optional[str], conn=None):
     if conn is None:
         conn = sqlite3.connect(str(dimension._base / "dimension.db"))
-        conn.row_factory = sqlite3.Row
         should_close = True
     else:
         should_close = False
+    conn.row_factory = sqlite3.Row
     try:
         base_sql = "SELECT id, realm, domain, content, metadata, source_file, created_at FROM entities"
         params = []

@@ -26,6 +26,7 @@ except ImportError:
     HAS_HTTP = False
 
 from alt_memory import dim_graph
+from alt_memory._stdio import reconfigure_stdio_utf8_on_windows
 from alt_memory.config import AltMemoryConfig
 from alt_memory.dialect import aaak_compress, aaak_decompress, aaak_parse_entry
 from alt_memory.dimension import Dimension
@@ -1645,6 +1646,7 @@ def run_server(dim: Dimension, host: str = "127.0.0.1", port: int = 8316,
         ``"stdio"`` (read/write JSON-RPC on stdin/stdout) or
         ``"sse"`` (HTTP server with ``GET /health`` and ``POST /mcp``).
     """
+    reconfigure_stdio_utf8_on_windows()
     _maybe_eager_warmup_embedder(dim)
     _start_idle_exit_watchdog()
 

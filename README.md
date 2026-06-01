@@ -406,23 +406,23 @@ alt-memory wake-up --agent claude --last-n 5
 
 ### Personas (Character Definitions with Isolated Memory)
 
-A persona in Alt Memory is a **character definition** — a system prompt with metadata that defines how an AI agent behaves. Modeled after [Eternal AI's on-chain agent persona](https://github.com/eternalai-org/eternal-ai) (character file → ERC-721 NFT → injected as system role in LLM calls).
+A persona in Alt Memory is a **character definition** — a plain system prompt with a name, exactly like [Eternal AI's `.txt` character files](https://github.com/eternalai-org/eternal-ai). In Eternal AI, the character file is minted as an ERC-721 NFT on-chain and injected as the `system` role in every LLM call. The model and framework are **deployment parameters chosen by the user**, not part of the character definition — Alt Memory follows the same separation.
 
 Each persona gets its own `persona_<name>` realm for memory isolation, plus a character definition stored in `persona.json`.
+
+**Full docs: [`docs/personas.md`](docs/personas.md)**
 
 ```python
 from alt_memory import Dimension
 d = Dimension()
 d.init()
 
-# Create a persona with full character definition
+# Create a persona with a character definition (just system prompt + name)
 d.create_persona(
     name="donald_trump",
     system_prompt="Act as if you are Donald Trump, the President of the United States. "
                   "Be confident, assertive, and unapologetic. Use superlatives.",
     description="A Donald Trump twin agent",
-    model="DeepSeek-R1-Distill-Llama-70B",
-    framework="eternalai",
     metadata={"chain": "base"}
 )
 
@@ -432,24 +432,32 @@ d.set_persona("donald_trump")
 # Memories go to the persona's realm
 d.add_entity("persona_donald_trump", "ideas", "Build a wall and make the AI pay for it")
 
-# Switch persona — realm isolation
+# Switch persona — realm isolation with a different character
 d.set_persona(
     "elon_musk",
     system_prompt="Act as if you are Elon Musk, visionary entrepreneur...",
     description="Elon Musk twin",
-    model="gpt-4",
 )
 ```
 
-**Get active persona** — returns full dict with character definition:
+**Get active persona** — returns the character definition:
 ```python
 d.get_persona()
-# {"name": "elon_musk", "system_prompt": "...", "description": "...",
-#  "model": "gpt-4", "framework": "", "metadata": {}}
+# {"name": "elon_musk", "system_prompt": "...", "description": "...", "metadata": {}}
 
-# Get just the system prompt
+# Get just the system prompt for LLM injection
 d.get_persona_character()
 # "Act as if you are Elon Musk..."
+```
+
+**Model and framework** are NOT stored in the persona — they're choices you make when you deploy/invoke the persona, same as `eai agent create -m <model> -f <framework>`:
+
+```python
+# The persona is just the character file. You choose the model at chat time.
+model = "gpt-4"  # your choice
+framework = "opencode"  # your choice
+system_prompt = d.get_persona_character()
+# Now inject system_prompt as the system role + model as the LLM backend
 ```
 
 **List all registered personas:**
@@ -463,9 +471,7 @@ MCP:
 ```json
 {"name": "create_persona", "arguments": {
   "name": "coder",
-  "system_prompt": "You are an expert Python developer...",
-  "model": "gpt-4",
-  "framework": "opencode"
+  "system_prompt": "You are an expert Python developer..."
 }}
 {"name": "set_persona", "arguments": {"name": "coder"}}
 {"name": "get_persona", "arguments": {}}

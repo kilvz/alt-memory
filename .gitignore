@@ -7,6 +7,7 @@ dist/
 build/
 *.md
 !README.md
+!docs/personas.md
 AGENTS.md
 benchmarks/results_*
 benchmarks/quick_matrix.py

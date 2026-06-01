@@ -349,20 +349,22 @@ personal/ideas ──tunnel──▶ work/features
 
 ## Personas (Character Definitions)
 
-A persona is a **character definition** — system prompt + metadata — that defines how an AI agent behaves. Modeled after [Eternal AI's on-chain agent persona](https://github.com/eternalai-org/eternal-ai) (character file minted as ERC-721 NFT, injected as `system` role in LLM calls).
+A persona is a **character definition** — just a system prompt + name — that defines how an AI agent behaves. Modeled after [Eternal AI's on-chain agent persona](https://github.com/eternalai-org/eternal-ai): a plain `.txt` character file minted as an ERC-721 NFT, injected as the `system` role in LLM calls.
+
+In Eternal AI, the model and framework are **deployment parameters chosen by the user** (`eai agent create -m <model> -f <framework>`), not part of the character file. Alt Memory follows the same separation.
 
 ### Persona Schema
 
 ```python
 {
     "name": "donald_trump",              # unique identifier
-    "system_prompt": "Act as if...",     # character system prompt
+    "system_prompt": "Act as if...",     # character system prompt (the .txt file)
     "description": "Donald Trump twin",  # short description
-    "model": "DeepSeek-R1-Distill-Llama-70B",  # preferred LLM
-    "framework": "eternalai",             # agent framework
-    "metadata": {"chain": "base"}         # extensible
+    "metadata": {"chain": "base"}        # extensible
 }
 ```
+
+No `model` or `framework` — those belong to the deployment, not the character.
 
 ### Storage
 
@@ -376,8 +378,6 @@ Personae are stored in `persona.json` in the dimension directory:
       "name": "donald_trump",
       "system_prompt": "Act as if you are Donald Trump...",
       "description": "A Donald Trump twin",
-      "model": "DeepSeek-R1-Distill-Llama-70B",
-      "framework": "eternalai",
       "metadata": {"chain": "base"}
     }
   }
@@ -386,7 +386,7 @@ Personae are stored in `persona.json` in the dimension directory:
 
 Legacy format `{"persona": "name"}` is auto-upgraded on read.
 
-### Key Methods (`dimension.py:1598-1741`)
+### Key Methods (`dimension.py`)
 
 | Method | Description |
 |--------|-------------|
@@ -401,7 +401,7 @@ Legacy format `{"persona": "name"}` is auto-upgraded on read.
 
 Setting a persona as active creates a `persona_<name>` realm. All memory operations targeting that realm are isolated from other personas. Switching persona doesn't hide or delete other realms — it just changes the active identity.
 
-Unlike the old system (where persona was just a bare namespace label), the new persona carries a full character definition that an AI agent can inject as its system prompt, matching how Eternal AI agents use character files.
+The persona carries a character definition that an AI agent can inject as its system prompt, matching how Eternal AI agents use character files. The model and framework are chosen at inference time, not stored in the persona.
 
 ### MCP Tools
 

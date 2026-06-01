@@ -173,6 +173,184 @@ Switching persona does not affect other realms — memories in `persona_coder` s
 
 ---
 
+## Memory Retrieval Architecture
+
+This section covers how Alt Memory searches and retrieves memories. Since persona realms are just regular realms, all of these operations work identically on `persona_<name>` — just pass `realm="persona_<name>"` to scope the search.
+
+### Three Search Modes
+
+| Mode | Method | How it works | Best for |
+|------|--------|-------------|----------|
+| **Vector** | `mode="vector"` | Embed query → FAISS `IndexIDMap.search()` → cosine distance ranking | Semantic similarity ("find related concepts") |
+| **Keyword** | `mode="keyword"` | FTS5 token match → BM25 ranking | Exact term lookup ("find where I wrote 'login bug'") |
+| **Hybrid** | `mode="hybrid"` (default) | Vector + keyword results merged, re-ranked by weighted BM25 | General-purpose — catches both semantic and exact matches |
+
+### Entry Point: `search()`
+
+```python
+def search(query, n_results=10, realm=None, domain=None, mode="hybrid"):
+    if no vector store:      fallback to keyword
+    if mode == "keyword":    _keyword_search()
+    if mode == "vector":     _vector_search()
+    if mode == "hybrid":     _hybrid_search()
+```
+
+The `realm` and `domain` filters are applied downstream in each search path. The `mode` parameter selects the retrieval strategy.
+
+### Vector Path (`_vector_search`)
+
+```
+query text
+  → embedder.embed(query) → np.ndarray
+  → FaissStore.search(embedding, k=n_results×2)
+  → FAISS IndexIDMap returns (ids, texts, distances, metadatas)
+  → Python-side filter by realm/domain
+  → Return top-k SearchResult items sorted by cosine distance
+```
+
+```python
+# dimension.py:1062
+def _vector_search(self, query, n_results, realm, domain):
+    query_emb = self._embedder.embed([query])[0]
+    ids, texts, distances, metadatas = self._store.search(query_emb, n_results=n_results * 2)
+    # filter realm/domain, return top-n_results
+```
+
+The embedder is pluggable — numpy TF-IDF/SVD by default, but can be ONNX MiniLM, BERT, sentence-transformers, or spaCy. Regardless of embedder, the FAISS index stores 384–768 dim float vectors and searches via exact (brute-force) L2/cosine.
+
+### Keyword Path (`_keyword_search`)
+
+```
+query: "login safari"
+  → _build_fts_query() → "login* AND safari*"
+  → FTS5 MATCH on entities_fts table
+  → JOIN entities e ON e.id = f.id
+  → Optional WHERE e.realm = ? / e.domain = ? filter
+  → ORDER BY rank (BM25 built-in)
+  → LIMIT n_results
+  → Fallback to _vector_search if FTS5 query fails
+```
+
+```python
+# dimension.py:1082
+def _keyword_search(self, query, n_results, realm, domain):
+    if not self._fts_enabled:
+        return self._vector_search(query, n_results, realm, domain)  # fallback
+    fts_query = self._build_fts_query(query)
+    sql = """SELECT e.id, e.realm, e.domain, e.content, e.metadata, rank
+             FROM entities_fts f JOIN entities e ON e.id = f.id
+             WHERE entities_fts MATCH ?"""
+    # + optional realm/domain WHERE clauses
+    # + ORDER BY rank LIMIT ?
+    rows = self._db_execute(sql, params).fetchall()
+    # wrap in SearchResult with distance = 1.0 - rank
+```
+
+**FTS5 query construction** (`_build_fts_query`, `dimension.py:1112`):
+
+| Input | Output | Rule |
+|-------|--------|------|
+| `"login safari"` | `"login* AND safari*"` | Bare terms → `term*` prefix wildcards joined by AND |
+| `"login AND safari"` | `"login AND safari"` | Operators (AND, OR, NOT, NEAR) passed through verbatim |
+| `"\"login safari\""` | `"\"login safari\""` | Phrase queries passed through verbatim |
+| `"multi-part"` | `"multi* AND part*"` | Hyphenated terms split on `-` |
+
+### Hybrid Path (`_hybrid_search`)
+
+```
+query
+  ├── _vector_search(query, n_results×2)   → vec_results
+  └── _keyword_search(query, n_results×2)  → kw_results
+
+1. Normalize keyword distances to [0, 1] (match cosine scale)
+2. Dedup by entity ID — vec_results first, kw_results fill gaps
+3. Sort by distance descending
+4. Return top-n_results
+```
+
+```python
+# dimension.py:1138
+def _hybrid_search(self, query, n_results, realm, domain):
+    vec_results = self._vector_search(query, n_results * 2, realm, domain)
+    kw_results = self._keyword_search(query, n_results * 2, realm, domain)
+    # normalize keyword distances, dedup by id, sort, return
+```
+
+### Full Pipeline: `search_memories()`
+
+The MCP server's `search` tool uses `search_memories()` (`dimension.py:881`) — a richer pipeline than `search()`:
+
+```
+search_memories(query, realm, domain, candidate_strategy, max_distance, vector_disabled)
+
+1. vector_disabled=True? → route to keyword-only, return
+2. _vector_search(query, n_results×3)   → vec_candidates
+3. _keyword_search(query, n_results×3)  → kw_candidates
+4. Apply max_distance threshold on vec_results (filter out distant matches)
+5. Merge candidates (strategy: "vector" or "union")
+   - "vector":   only vector candidates (default)
+   - "union":    append BM25-only results not already in vec candidates
+6. Node boost — entities whose source files have cross-reference nodes get a boost
+7. Hydration — for boosted results, find best keyword-matching neighbor chunks (±1)
+8. BM25 re-rank — _hybrid_rank(hits, query) with weights 0.6 vector + 0.4 BM25
+9. Attach node_preview text to results
+10. Return top-n_results dict
+```
+
+**Node boost** (`dimension.py:976`): When a source file has entity cross-references in the `nodes` table (e.g., "→entity_id1,entity_id2"), all results from that file get a `node_boost` multiplier. This prioritizes memories that are actively cross-referenced over orphaned ones.
+
+**Hydration** (`dimension.py:1005`): For boosted results, the system re-queries the source file's chunks, picks the one with the best BM25 match to the query, and expands it with ±1 neighbor chunks for context.
+
+### Direct Lookups
+
+These bypass the search pipeline entirely:
+
+```python
+# By primary key — raw SQL
+d.get_entity("entity_abc123")
+# → {"id": "entity_abc123", "realm": "...", "domain": "...",
+#     "content": "...", "metadata": {...}, "source_file": "...", "created_at": "..."}
+
+# By realm/domain with pagination — SQL with filters, sorted by created_at DESC
+d.list_entities(realm="persona_coder", limit=20, offset=0)
+d.list_entities(realm="persona_coder", domain="preferences")
+```
+
+### Full Pipeline Diagram
+
+```
+                    ┌──────────────┐
+                    │  search()    │
+                    │  or          │
+                    │ search_mem() │
+                    └──────┬───────┘
+                           │
+                    ┌──────▼───────┐
+                    │  Mode check  │
+                    └──┬───┬───┬───┘
+                       │   │   │
+              ┌────────┘   │   └────────┐
+              ▼            ▼            ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │ keyword  │ │ vector   │ │ hybrid   │
+        │ FTS5     │ │ embed    │ │ vec ×2   │
+        │ BM25     │ │ FAISS    │ │ kw  ×2   │
+        │ rank     │ │ cosine   │ │ merge    │
+        └──────────┘ │ distance │ │ re-rank  │
+                     └──────────┘ └──────────┘
+                                      │
+                              ┌───────▼────────┐
+                              │ search_mem()   │
+                              │ extra steps:   │
+                              │ • max_distance │
+                              │ • node boost   │
+                              │ • hydration    │
+                              │ • BM25 rerank  │
+                              └────────────────┘
+```
+
+---
+
 ## Retrieving Persona Memories
 
 The `persona_<name>` realm is a regular realm — all search, list, and retrieval operations work on it identically, just filtered by `realm=`.
